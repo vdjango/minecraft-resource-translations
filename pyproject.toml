@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minecraft-translation-platform"
+version = "0.1.0"
+description = "Shared, versioned Minecraft resource translations"
+license = {file = "LICENSE"}
+keywords = ["minecraft", "translation", "launcher", "federation"]
+classifiers = ["Development Status :: 4 - Beta", "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)", "Programming Language :: Python :: 3.11", "Programming Language :: Python :: 3.12", "Topic :: Internet :: WWW/HTTP :: HTTP Servers"]
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.11,<4", "aiosqlite>=0.21,<1", "bleach>=6.2,<7", "jsonschema>=4.23,<5"]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.10,<7"]
+windows = ["pywin32>=306; platform_system == 'Windows'"]
+
+[project.scripts]
+mc-translate = "mc_translate.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mc_translate = ["web/*", "web/examples/*", "contracts/*"]

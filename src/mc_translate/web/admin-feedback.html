@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>控制台 · Buggcraft Translate</title>
+<script src="/assets/theme.js?v=20261025-layout2"></script><link rel="stylesheet" href="/assets/style.css?v=20261025-layout2"><link rel="stylesheet" href="/assets/admin.css?v=20261026-network1">
+<script src="/assets/admin.js?v=20261026-network1" defer></script>
+</head><body class="admin-page">
+<nav><a class="brand" href="/"><span class="mark">B</span><span class="brand-type"><strong>BUGGCRAFT</strong><small>TRANSLATE CONSOLE</small></span></a><div class="nav-links"><a href="/">译文库 ↗</a><a href="/docs">开放文档</a></div></nav>
+<main class="admin-shell">
+<aside class="admin-sidebar"><span class="eyebrow">工作区</span><a href="/admin">运行概览</a><a href="/admin/traffic">访问统计</a><a href="/admin/nodes">联邦节点</a><a href="/admin/model">模型与额度</a><a href="/admin/tasks">翻译任务</a><a href="/admin/usage">用量与费用</a><a href="/admin/mail">邮件通知</a><a href="/admin/clients">接入申请</a><a class="active" aria-current="page" href="/admin/feedback">译文反馈</a><div class="sidebar-bottom">Buggcraft Translate</div></aside>
+<div class="admin-content">
+<header class="admin-header"><div><div class="eyebrow">PLATFORM MANAGEMENT</div><h1 id="page-title">译文反馈</h1><p class="muted">管理翻译服务、开发者接入与通知。</p></div><button id="logout" type="button" class="secondary hidden">退出管理</button></header>
+<section id="session-loading" class="admin-card session-loading" role="status"><span class="session-dot" aria-hidden="true"></span><p id="session-state">正在恢复管理会话…</p><button id="retry-session" class="secondary hidden" type="button">重新连接</button></section>
+<section id="login-card" class="admin-card login-card hidden"><div class="section-caption">管理员访问</div><h2>登录工作台</h2><p class="muted">使用服务端管理员令牌。令牌仅用于建立浏览器管理会话，一小时后过期。</p><form id="login"><label for="token">管理令牌</label><div class="login-row"><input type="password" id="token" autocomplete="off" placeholder="输入管理员令牌" required><button>登录管理台 →</button></div></form></section>
+<p id="message" class="admin-message" role="status" aria-live="polite"></p>
+<div id="panel" class="hidden">
+
+
+
+
+<section id="feedback-section" class="admin-section"><div class="section-caption">TRANSLATION QUALITY</div><h2>译文反馈</h2><div id="feedback" class="admin-list"></div></section>
+</div></div></main>
+<dialog id="review-dialog"><form id="review-form"><div class="section-caption">CLIENT QUOTA</div><h2 id="review-name">批准申请</h2><p class="muted small">独立额度仍受平台全局预算及 IP 防滥用限额约束。</p><input id="review-id" type="hidden"><label>每小时翻译字段数<input id="review-fields" type="number" min="1" max="100000" required></label><label>每分钟请求数<input id="review-rpm" type="number" min="1" max="10000" required></label><div class="action-row"><button type="button" id="review-cancel" class="secondary">取消</button><button type="submit">确认启用</button></div></form></dialog>
+</body></html>

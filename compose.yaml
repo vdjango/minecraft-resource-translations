@@ -1,0 +1,17 @@
+services:
+  translation:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TRANSLATION_HOST: 0.0.0.0
+      TRANSLATION_DATABASE: /data/translations.sqlite3
+    ports:
+      - "127.0.0.1:18448:18448"
+    volumes:
+      - translations:/data
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  translations:

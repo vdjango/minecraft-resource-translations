@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title desc">
+  <title id="title">Buggcraft Translate</title>
+  <desc id="desc">A linked B mark for the Buggcraft translation platform</desc>
+  <rect width="96" height="96" rx="20" fill="#171222"/>
+  <path d="M29 22h23c13 0 21 6 21 16 0 6-3 10-8 13 7 3 10 8 10 15 0 11-9 18-24 18H29V22Zm14 12v12h9c5 0 8-2 8-6s-3-6-8-6h-9Zm0 24v14h10c6 0 10-2 10-7s-4-7-10-7H43Z" fill="#c8b2ff"/>
+  <path d="M22 68h9v16h-9zM65 12h9v16h-9z" fill="#8260ff"/>
+</svg>

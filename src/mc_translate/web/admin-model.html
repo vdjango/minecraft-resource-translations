@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>控制台 · Buggcraft Translate</title>
+<script src="/assets/theme.js?v=20261025-layout2"></script><link rel="stylesheet" href="/assets/style.css?v=20261025-layout2"><link rel="stylesheet" href="/assets/admin.css?v=20261026-network1">
+<script src="/assets/admin.js?v=20261026-network1" defer></script>
+</head><body class="admin-page">
+<nav><a class="brand" href="/"><span class="mark">B</span><span class="brand-type"><strong>BUGGCRAFT</strong><small>TRANSLATE CONSOLE</small></span></a><div class="nav-links"><a href="/">译文库 ↗</a><a href="/docs">开放文档</a></div></nav>
+<main class="admin-shell">
+<aside class="admin-sidebar"><span class="eyebrow">工作区</span><a href="/admin">运行概览</a><a href="/admin/traffic">访问统计</a><a href="/admin/nodes">联邦节点</a><a class="active" aria-current="page" href="/admin/model">模型与额度</a><a href="/admin/tasks">翻译任务</a><a href="/admin/usage">用量与费用</a><a href="/admin/mail">邮件通知</a><a href="/admin/clients">接入申请</a><a href="/admin/feedback">译文反馈</a><div class="sidebar-bottom">Buggcraft Translate</div></aside>
+<div class="admin-content">
+<header class="admin-header"><div><div class="eyebrow">PLATFORM MANAGEMENT</div><h1 id="page-title">模型与额度</h1><p class="muted">管理翻译服务、开发者接入与通知。</p></div><button id="logout" type="button" class="secondary hidden">退出管理</button></header>
+<section id="session-loading" class="admin-card session-loading" role="status"><span class="session-dot" aria-hidden="true"></span><p id="session-state">正在恢复管理会话…</p><button id="retry-session" class="secondary hidden" type="button">重新连接</button></section>
+<section id="login-card" class="admin-card login-card hidden"><div class="section-caption">管理员访问</div><h2>登录工作台</h2><p class="muted">使用服务端管理员令牌。令牌仅用于建立浏览器管理会话，一小时后过期。</p><form id="login"><label for="token">管理令牌</label><div class="login-row"><input type="password" id="token" autocomplete="off" placeholder="输入管理员令牌" required><button>登录管理台 →</button></div></form></section>
+<p id="message" class="admin-message" role="status" aria-live="polite"></p>
+<div id="panel" class="hidden">
+
+<section id="model-section" class="admin-section admin-card"><div class="section-heading"><div><div class="section-caption">MODEL PROVIDER</div><h2>模型服务</h2></div><span class="badge">OpenAI 兼容</span></div><p class="muted">从服务商模型列表选择模型。配置用于后续请求，正在执行的翻译继续完成。</p>
+<form id="settings" class="admin-form"><div class="form-grid">
+<label class="wide">API 基础地址<input id="base-url" type="url" required placeholder="https://api.example.com/v1"><small>包含 /v1；更换服务商时填写新密钥，再读取模型。</small></label>
+<label class="wide">替换 API Key<input id="api-key" type="password" autocomplete="new-password" placeholder="留空保留当前密钥"><small id="key-state"></small></label>
+<label>模型<select id="model" required aria-describedby="model-state"><option value="">正在读取模型…</option></select></label>
+<label>推理档位<select id="effort"><option value="none">关闭推理</option><option value="minimal">极简</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option></select></label>
+<div class="wide model-tools"><button id="refresh-models" type="button" class="secondary">读取服务商模型</button><span id="model-state" role="status" class="muted small"></span></div>
+</div><h3 class="form-divider">用量与性能</h3><div class="form-grid three">
+<label>每日 Token 上限<input id="daily-tokens" type="number" min="0" required></label><label>每月 Token 上限<input id="monthly-tokens" type="number" min="0" required></label><label>每日调用上限<input id="daily-calls" type="number" min="0" required></label>
+<label>最大输出 Token<input id="completion-tokens" type="number" min="256" max="131072" required></label><label>调用超时 / 秒<input id="timeout" type="number" min="10" max="600" required></label></div><h3 class="form-divider">当前模型费用 · 美元 / 百万 Token</h3><p class="muted small">填写实际服务商价格；留空表示费用未知。历史调用保留当时计价结果。</p><div class="form-grid three"><label>输入<input id="price-input" type="number" min="0" step="0.000001"></label><label>缓存输入<input id="price-cached" type="number" min="0" step="0.000001"></label><label>输出<input id="price-output" type="number" min="0" step="0.000001"></label></div><div class="form-footer"><span class="muted small">上游密钥保存后不会回显。</span><button type="submit">保存模型配置</button></div></form></section>
+
+
+
+</div></div></main>
+<dialog id="review-dialog"><form id="review-form"><div class="section-caption">CLIENT QUOTA</div><h2 id="review-name">批准申请</h2><p class="muted small">独立额度仍受平台全局预算及 IP 防滥用限额约束。</p><input id="review-id" type="hidden"><label>每小时翻译字段数<input id="review-fields" type="number" min="1" max="100000" required></label><label>每分钟请求数<input id="review-rpm" type="number" min="1" max="10000" required></label><div class="action-row"><button type="button" id="review-cancel" class="secondary">取消</button><button type="submit">确认启用</button></div></form></dialog>
+</body></html>
