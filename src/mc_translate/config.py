@@ -88,7 +88,7 @@ def load_env(path=".env"):
     """Small literal env reader; never evaluate shell expressions."""
     file = Path(path)
     if file.is_file():
-        for line in file.read_text(encoding="utf-8").splitlines():
+        for line in file.read_text(encoding="utf-8-sig").splitlines():
             if line.strip() and not line.lstrip().startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
                 if key.strip().startswith("TRANSLATION_"):

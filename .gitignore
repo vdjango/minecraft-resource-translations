@@ -9,6 +9,7 @@ __pycache__/
 dist/
 .ruff_cache/
 build/
+*.spec
 bin/
 obj/
 federation-node.json
