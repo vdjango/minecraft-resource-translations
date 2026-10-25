@@ -85,8 +85,8 @@ TRANSLATION_ADMIN_TOKEN=随机生成的后台令牌
 CI 会构建可安装的 `.deb`。下载对应版本的包后，直接用 apt 安装，安装脚本会创建专用系统用户、虚拟环境、systemd 服务和随机后台令牌：
 
 ```sh
-wget https://github.com/vdjango/minecraft-resource-translations/releases/latest/download/buggcraft-translation_0.1.2_all.deb
-sudo apt install ./buggcraft-translation_0.1.2_all.deb
+wget https://github.com/vdjango/minecraft-resource-translations/releases/latest/download/buggcraft-translation_0.1.3_all.deb
+sudo apt install ./buggcraft-translation_0.1.3_all.deb
 sudo systemctl status buggcraft-translation
 sudoedit /etc/buggcraft-translation.env
 ```
