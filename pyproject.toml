@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minecraft-translation-platform"
-version = "0.1.1"
+version = "0.1.2"
 description = "Shared, versioned Minecraft resource translations"
 license = {file = "LICENSE"}
 keywords = ["minecraft", "translation", "launcher", "federation"]

@@ -44,9 +44,16 @@ jobs:
       - shell: pwsh
         run: ./scripts/smoke_windows_service.ps1
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: mc-translate-windows
           path: dist/mc-translate-windows.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mc-translate-windows-diagnostics
+          path: dist/service-smoke.log
+          if-no-files-found: ignore
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
