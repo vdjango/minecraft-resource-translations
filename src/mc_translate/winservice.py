@@ -5,6 +5,7 @@ HTTP entrypoint remains dependency-free on Linux and macOS.
 """
 
 import asyncio
+import logging
 import os
 import threading
 import sys
@@ -39,24 +40,37 @@ class TranslationService(win32serviceutil.ServiceFramework):
         win32event.SetEvent(self.stop_handle)
 
     def SvcDoRun(self):
-        servicemanager.LogInfoMsg(f"{self._svc_name_} started")
+        log_path = Path(sys.executable).resolve().parent / "service.log"
+        logging.basicConfig(
+            filename=log_path,
+            filemode="w",
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            force=True,
+        )
+        logging.info("Service process started")
         try:
+            servicemanager.LogInfoMsg(f"{self._svc_name_} started")
             asyncio.run(self._serve())
-        except Exception as exc:  # pragma: no cover - SCM-only path
-            servicemanager.LogErrorMsg(f"{self._svc_name_} failed: {exc}")
+        except Exception:  # pragma: no cover - SCM-only path
+            logging.exception("Service startup failed")
+            servicemanager.LogErrorMsg(f"{self._svc_name_} failed; see service.log")
             raise
 
     async def _serve(self):
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
                             r"SYSTEM\CurrentControlSet\Services\BuggcraftTranslation\Parameters") as key:
             config_path = winreg.QueryValueEx(key, "EnvFile")[0]
+        logging.info("Loading service configuration")
         os.chdir(Path(config_path).resolve().parent)
         load_env(config_path)
         config = Config.from_env()
+        logging.info("Starting HTTP listener on %s:%s", config.host, config.port)
         runner = web.AppRunner(create_app(config))
         await runner.setup()
         site = web.TCPSite(runner, config.host, config.port)
         await site.start()
+        logging.info("HTTP listener started")
         try:
             while not self.stop_requested.is_set():
                 await asyncio.sleep(0.5)

@@ -19,6 +19,11 @@ try {
         "Service registry:" | Out-File $Diagnostics -Append -Encoding utf8
         Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\BuggcraftTranslation" -ErrorAction SilentlyContinue |
             Format-List ImagePath,ObjectName,Start,Type | Out-String | Out-File $Diagnostics -Append -Encoding utf8
+        $ServiceLog = Join-Path $Package "service.log"
+        if (Test-Path $ServiceLog) {
+            "Service process log:" | Out-File $Diagnostics -Append -Encoding utf8
+            Get-Content $ServiceLog -Tail 80 | Out-File $Diagnostics -Append -Encoding utf8
+        }
         "Application events:" | Out-File $Diagnostics -Append -Encoding utf8
         Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = (Get-Date).AddMinutes(-5) } -ErrorAction SilentlyContinue |
             Where-Object { $_.Message -like "*BuggcraftTranslation*" -or $_.ProviderName -eq "Python Service" } |
