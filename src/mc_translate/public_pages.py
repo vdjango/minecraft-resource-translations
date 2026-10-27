@@ -69,7 +69,9 @@ class PublicPages:
     def response(self, request, text, content_type="text/html", status=200, cache=False):
         body = text.encode("utf-8")
         etag = '"' + hashlib.sha256(body).hexdigest() + '"'
-        headers = {"ETag": etag, "Cache-Control": "public, max-age=0, must-revalidate" if cache else "no-store"}
+        # The deployed CDN enforces a long browser TTL for cacheable responses.
+        # Keep HTML/status freshness in the bounded origin cache, not browser storage.
+        headers = {"ETag": etag, "Cache-Control": "no-cache, no-store, must-revalidate", "Cloudflare-CDN-Cache-Control": "no-store"}
         if cache and request.headers.get("If-None-Match") == etag:
             return web.Response(status=304, headers=headers)
         response = web.Response(body=body, content_type=content_type, charset="utf-8", status=status, headers=headers)

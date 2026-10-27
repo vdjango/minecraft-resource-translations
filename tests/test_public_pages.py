@@ -24,6 +24,8 @@ class PublicPagesCase(PlatformFixture):
         response = await self.client.get("/projects/modrinth/Fixture01")
         html = await response.text()
         self.assertEqual(response.status, 200)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertEqual(response.headers["Cloudflare-CDN-Cache-Control"], "no-store")
         self.assertIn("一个快速的模组", html)
         self.assertIn('<code>fabric</code>', html)
         self.assertIn('rel="canonical" href="http://localhost/projects/modrinth/Fixture01"', html)
