@@ -1,0 +1,44 @@
+import {afterEach,expect,it,vi} from 'vitest';
+import {createApp,h,nextTick} from 'vue';
+import Catalog,{type Project} from '../src/Catalog.vue';
+import {createViews} from '../src/views';
+let dispose:undefined|(()=>void);
+afterEach(()=>{dispose?.();document.body.replaceChildren();});
+it('reconciles a ready list badge when the current detail is still translating',async()=>{
+  document.body.innerHTML='<section id="projects"></section><div id="catalog-seed"></div>';
+  const project={resource:{provider:'modrinth',project_id:'example'},title:'Example',summary:'Original',kind:'mod',translation_state:'ready'};
+  document.getElementById('catalog-seed')!.setAttribute('data-catalog',JSON.stringify({projects:[project],total_count:1,next_cursor:null}));
+  const views=createViews();views.catalog.mount(()=>{});dispose=()=>views.dispose();
+  await nextTick();expect(document.querySelector('.translation-badge')?.textContent).toContain('简介与正文已就绪');
+  expect(document.querySelector('.resource-title')?.getAttribute('href')).toBe('/projects/modrinth/example');
+  views.catalog.detail(project.resource,[{field:'summary',state:'ready',is_current:true,translation:{text:'当前简介'}},{field:'body',state:'missing',is_current:false,update:{notice:'原文已更新，正在翻译'}}],'简体中文');
+  await nextTick();expect(document.querySelector('.translation-badge')?.textContent).toBe('原文已更新，正在翻译');
+  expect(document.querySelector('.resource-summary')?.textContent).toBe('当前简介');
+  views.catalog.detail(project.resource,['summary','body'].map(field=>({field,state:'ready',is_current:true})),'简体中文');
+  await nextTick();expect(document.querySelector('.translation-badge')?.textContent).toContain('简介与正文已就绪');
+});
+it('keeps metadata and translated summaries, escapes source text and opens the selected resource',async()=>{
+  const project:Project={resource:{provider:'modrinth',project_id:'example'},title:'<script>unsafe</script>',summary:'English',localized_summary:'中文简介',kind:'mod',translation_state:'ready',metadata:{authors:[{name:'Author'}],icon_url:'javascript:alert(1)',downloads:0,dependency_count:0,game_versions:['1.20','1.21'],tags:['optimization']}};
+  const host=document.createElement('div');document.body.append(host);
+  const open=vi.fn(), app=createApp({render:()=>h(Catalog,{projects:[project],language:'简体中文',loading:false,open})});
+  app.mount(host);dispose=()=>app.unmount();
+  await nextTick();
+  expect(host.querySelector('script')).toBeNull();
+  expect(host.querySelector('img')).toBeNull();
+  expect(host.textContent).toContain('中文简介');
+  expect(host.textContent).toContain('性能优化');
+  expect(host.textContent).toContain('最新版本 0 项');
+  host.querySelector<HTMLButtonElement>('.resource-title')!.click();
+  expect(open).toHaveBeenCalledWith(project.resource);
+});
+it('keeps the original initial while an icon is loading or fails',async()=>{
+  const host=document.createElement('div');document.body.append(host);
+  const app=createApp({render:()=>h(Catalog,{projects:[{resource:{provider:'modrinth',project_id:'a'},title:'Alpha',summary:'',kind:'mod',translation_state:'ready',metadata:{icon_url:'https://example.test/icon.png'}}],language:'中文',loading:false,open:()=>{}})});
+  app.mount(host);dispose=()=>app.unmount();
+  expect(host.querySelector('.project-icon span')?.textContent).toBe('A');
+  const img=host.querySelector('img')!;
+  img.dispatchEvent(new Event('load'));await nextTick();
+  expect(host.querySelector('.project-icon span')).toBeNull();
+  img.dispatchEvent(new Event('error'));await nextTick();
+  expect(host.querySelector('.project-icon span')?.textContent).toBe('A');
+});

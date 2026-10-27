@@ -1180,6 +1180,23 @@
         ]
       }
     },
+    "/v1/projects/{provider}/{project_id}/detail": {
+      "get": {
+        "operationId": "projectDetail",
+        "summary": "Read current stored source and usable summary/body translations together; no upstream or model calls.",
+        "parameters": [
+          {"name": "provider", "in": "path", "required": true, "schema": {"type": "string", "enum": ["modrinth", "curseforge"]}},
+          {"name": "project_id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "target_language", "in": "query", "schema": {"type": "string", "default": "zh-Hans"}}
+        ],
+        "responses": {
+          "200": {"description": "source, target_language, and fields using the resolve field structure. Ready fields include translation.text (including body); only display ready when state=ready and is_current=true."},
+          "404": {"description": "project_not_indexed"},
+          "429": {"description": "Rate limit; obey Retry-After"},
+          "503": {"description": "project_updating; retry after Retry-After"}
+        }
+      }
+    },
     "/v1/projects/{provider}/{project_id}/source": {
       "get": {
         "operationId": "sourceProject",

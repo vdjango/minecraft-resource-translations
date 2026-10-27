@@ -118,6 +118,10 @@ async def boundary(request, handler):
     except (ValueError, TypeError, KeyError):
         response = web.json_response(error("invalid_request"), status=400)
     response.headers.setdefault("Cache-Control", "no-store")
+    if request.path.startswith("/assets/") and request.path.endswith((".js", ".css", ".png", ".svg", ".ico")):
+        response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
+        if re.fullmatch(r"/assets/vue-runtime-[A-Za-z0-9_-]+\.js", request.path):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     if request.path == "/developers" or request.path == "/v1/clients/applications":
         response.set_cookie("translation_device", request.app["api"].device(request), max_age=31536000, httponly=True, secure=request.app["api"].config.public_url.startswith("https:"), samesite="Lax")
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -126,6 +130,8 @@ async def boundary(request, handler):
     )
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
     response.headers["X-Content-Type-Options"] = "nosniff"
+    if request.path.startswith(("/admin", "/v1/")) or request.path.startswith("/assets/") and request.path.endswith(".html"):
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' " + " ".join(sorted(request.app["federation"].public_origins)) + "; img-src 'self' https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
@@ -1313,6 +1319,35 @@ class API:
             {k: v for k, v in source.items() if k not in ("checked", "accessed")}
         )
 
+    async def detail_data(self, resource, language):
+        """Read source and usable translations together, without upstream/model I/O."""
+        key = resource_key(resource)
+        for _ in range(3):
+            version = self.store.version
+            source = await self.store.source(key)
+            if not source:
+                raise ApiError("project_not_indexed", 404)
+            fields = []
+            for name in ("summary", "body"):
+                value = await self.field_result(resource, dict(field=name, source_hash=source["fields"][name]["source_hash"]), language, source=source)
+                if value["state"] == "ready":
+                    row = await self.store.translation(key, name, source["fields"][name]["source_hash"], language, self.store.context(source))
+                    if not row:
+                        break
+                    value["translation"]["text"] = row["text"]
+                fields.append(value)
+            if version == self.store.version and len(fields) == 2:
+                return dict(source={k: v for k, v in source.items() if k not in ("checked", "accessed")}, fields=fields, target_language=language)
+        raise ApiError("project_updating", 503, 1)
+
+    async def detail(self, request):
+        self.rate(request, "read")
+        language = normalize_language(request.query.get("target_language", DEFAULT_LANGUAGE))
+        value = await self.detail_data(resource_ref(request.match_info["provider"], request.match_info["project_id"]), language)
+        response = web.json_response(value)
+        response.enable_compression()
+        return response
+
     async def history(self, request):
         self.rate(request, "read")
         resource = resource_ref(
@@ -1563,6 +1598,9 @@ async def create_app(
     app["engine"] = engine
     app["store"] = store
     app["http"] = session
+    from .public_pages import PublicPages
+
+    public_pages = PublicPages(api, ROOT / "web")
     app.router.add_get("/v1/capabilities", api.capabilities)
     app.router.add_post("/v1/sessions/anonymous", api.session)
     app.router.add_post("/v1/translations:resolve", api.resolve)
@@ -1573,6 +1611,7 @@ async def create_app(
     base = "/v1/projects/{provider}/{project_id}"
     app.router.add_get(base + "/manifest", api.manifest)
     app.router.add_get(base + "/source", api.source_text)
+    app.router.add_get(base + "/detail", api.detail)
     app.router.add_post(base + "/refresh", api.refresh)
     app.router.add_get(base + "/history", api.history)
     app.router.add_get("/v1/catalog/projects", api.catalogue)
@@ -1631,9 +1670,14 @@ async def create_app(
     ):
 
         async def page(request, file=file):
-            return web.FileResponse(ROOT / "web" / file)
+            return await public_pages.page(request, file)
 
         app.router.add_get(route, page)
+    app.router.add_get("/robots.txt", public_pages.robots)
+    app.router.add_get("/sitemap.xml", public_pages.sitemap_index)
+    app.router.add_get("/sitemaps/pages.xml", public_pages.sitemap_pages)
+    app.router.add_get("/sitemaps/projects-{page:\\d+}.xml", public_pages.sitemap_projects)
+    app.router.add_get("/projects/{provider}/{project_id}", public_pages.project)
     app.router.add_static("/assets", ROOT / "web", show_index=False)
 
     async def startup(app):

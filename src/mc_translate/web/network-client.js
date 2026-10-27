@@ -2,7 +2,7 @@
 // Only anonymous public reads go to mirrors. Credentials and writes stay at hub.
 class TranslationNetwork {
   constructor() { this.hub=location.origin;this.selected=location.origin;this.selectedId="hub";this.candidates=[];this.failedUntil=new Map();this.refreshing=false;this.ready=this.initialize(); }
-  static read(path,options) { const method=(options.method||"GET").toUpperCase();return method==="POST"&&path==="translations:resolve"||method==="GET"&&(path.startsWith("artifacts/")||path.startsWith("catalog/")||/^projects\/[^/]+\/[^/]+\/(manifest|source|history)(\?|$)/.test(path)||path==="capabilities"); }
+  static read(path,options) { const method=(options.method||"GET").toUpperCase();return method==="POST"&&path==="translations:resolve"||method==="GET"&&(path.startsWith("artifacts/")||path.startsWith("catalog/")||/^projects\/[^/]+\/[^/]+\/(manifest|source|history|detail)(\?|$)/.test(path)||path==="capabilities"); }
   async initialize() {
     try {const response=await fetch("/v1/federation/health",{signal:AbortSignal.timeout(1800)});if(response.ok){const data=await response.json();if(data.role==="mirror"){this.hub=data.hub_url;this.selected=this.hub;}}}catch(error){/* Existing independent deployments remain usable. */}
     void this.select();

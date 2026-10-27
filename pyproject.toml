@@ -10,7 +10,7 @@ license = {file = "LICENSE"}
 keywords = ["minecraft", "translation", "launcher", "federation"]
 classifiers = ["Development Status :: 4 - Beta", "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)", "Programming Language :: Python :: 3.11", "Programming Language :: Python :: 3.12", "Topic :: Internet :: WWW/HTTP :: HTTP Servers"]
 requires-python = ">=3.11"
-dependencies = ["aiohttp>=3.11,<4", "aiosqlite>=0.21,<1", "bleach>=6.2,<7", "jsonschema>=4.23,<5"]
+dependencies = ["aiohttp>=3.11,<4", "aiosqlite>=0.21,<1", "bleach>=6.2,<7", "jsonschema>=4.23,<5", "markdown-it-py>=3,<5"]
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.10,<7"]

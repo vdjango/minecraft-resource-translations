@@ -1,0 +1,53 @@
+{
+  "admin-clients": [
+    "admin-records.js",
+    "admin.js"
+  ],
+  "admin-feedback": [
+    "admin.js"
+  ],
+  "admin-mail": [
+    "admin.js",
+    "admin-mail.js"
+  ],
+  "admin-model": [
+    "admin.js"
+  ],
+  "admin-nodes": [
+    "admin.js",
+    "admin-nodes.js"
+  ],
+  "admin-tasks": [
+    "admin-records.js",
+    "admin.js"
+  ],
+  "admin-traffic": [
+    "admin.js",
+    "admin-traffic.js"
+  ],
+  "admin-usage": [
+    "admin-records.js",
+    "admin.js"
+  ],
+  "admin": [
+    "admin.js",
+    "admin-traffic.js"
+  ],
+  "developers": [
+    "developers.js"
+  ],
+  "docs": [
+    "docs.js"
+  ],
+  "index": [
+    "network-client.js",
+    "app.js"
+  ],
+  "network": [
+    "network-client.js",
+    "network.js"
+  ],
+  "project": [
+    "project.js"
+  ]
+}

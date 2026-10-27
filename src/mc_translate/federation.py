@@ -299,7 +299,7 @@ class Federation:
 
     @staticmethod
     def mirror_read(path, method):
-        return (method == "POST" and path == "/v1/translations:resolve") or (method in ("GET", "HEAD") and (path.startswith("/v1/artifacts/") or path in ("/v1/capabilities", "/v1/catalog/projects", "/v1/catalog/search") or path.startswith("/v1/projects/") and path.rsplit("/", 1)[-1] in ("manifest", "source", "history")))
+        return (method == "POST" and path == "/v1/translations:resolve") or (method in ("GET", "HEAD") and (path.startswith("/v1/artifacts/") or path in ("/v1/capabilities", "/v1/catalog/projects", "/v1/catalog/search") or path.startswith("/v1/projects/") and path.rsplit("/", 1)[-1] in ("manifest", "source", "history", "detail")))
 
     async def proxy(self, request):
         from .api import ApiError
