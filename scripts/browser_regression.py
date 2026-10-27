@@ -62,11 +62,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass  # Navigation may cancel deliberately delayed fixture requests.
 
     def do_GET(self):
         url = urlsplit(self.path)
         if url.path.startswith("/v1/"):
+            if url.path.endswith('/federation/health'):
+                time.sleep(1.2)
+                return self.send(dict(role='hub'))
             if "catalog/" in url.path:
                 params = parse_qs(url.query)
                 limit = int(params.get("limit", [20])[0])
@@ -107,6 +113,7 @@ class Handler(BaseHTTPRequestHandler):
             if "/artifacts/" in url.path:
                 return self.send(dict(text=TRANSLATED, format="html"))
             if url.path.endswith("/capabilities"):
+                time.sleep(1.2)
                 return self.send(dict(generation_available=True))
             return self.send({}, status=404)
         relative = (
@@ -131,6 +138,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.endswith("sessions/anonymous"):
             return self.send(dict(access_token="fixture-token", expires_in=3600))
         if self.path.endswith("translations:ensure"):
+            time.sleep(5)  # Queueing must not block polling or ready translations.
             return self.send(dict(results=[]))
         if self.path.endswith("translations:resolve"):
             type(self).resolve_count += 1
@@ -174,10 +182,12 @@ def main():
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.route("https://example.com/**", lambda route: route.abort())
             base = f"http://127.0.0.1:{server.server_port}"
-            page.goto(base)
+            started = time.monotonic()
+            page.goto(base, wait_until='domcontentloaded')
             page.wait_for_function(
                 "document.querySelectorAll('.resource-card').length === 20"
             )
+            assert time.monotonic() - started < 1.15, 'Catalog blocked by capabilities/federation discovery'
             assert "75" in page.locator("#count").inner_text()
             assert page.locator("#previous-page").is_disabled()
             first_page = page.locator(".resource-title").all_text_contents()
@@ -222,7 +232,7 @@ def main():
             assert page.locator("#translated-body h2").inner_text() == "English heading"
             assert "原文" in page.locator("#body-language-label").inner_text()
             page.wait_for_function(
-                "document.getElementById('translated-body').dataset.revision === 'tr_fixture'"
+                "document.getElementById('translated-body').dataset.revision === 'tr_fixture'", timeout=4500
             )
             assert page.locator("#translated-body h2").inner_text() == "中文标题"
             assert (

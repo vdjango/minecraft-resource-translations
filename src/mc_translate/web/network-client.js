@@ -23,14 +23,15 @@ class TranslationNetwork {
     finally{this.refreshing=false;}
   }
   async fetch(path,options={}) {
-    await this.ready;
-    if(!TranslationNetwork.read(path,options))return fetch(this.hub+"/v1/"+path,options);
+    const timed=ms=>({...options,signal:options.signal?AbortSignal.any([options.signal,AbortSignal.timeout(ms)]):AbortSignal.timeout(ms)});
+    // Start local cached reads immediately; federation discovery runs in parallel.
+    if(!TranslationNetwork.read(path,options)){await this.ready;return fetch(this.hub+"/v1/"+path,timed(15000));}
     const preferred=this.selected;
     if(preferred!==this.hub&&(this.failedUntil.get(preferred)||0)<Date.now()){
-      try{const headers=new Headers(options.headers||{});headers.delete("Authorization");headers.delete("Cookie");headers.delete("Idempotency-Key");const response=await fetch(preferred+"/v1/"+path,{...options,headers,credentials:"omit",signal:AbortSignal.timeout(2500)});if(response.ok||response.status===304)return response;throw Error("node unavailable");}
-      catch(error){this.failedUntil.set(preferred,Date.now()+30000);this.selected=this.hub;this.selectedId="hub";}
+      try{const headers=new Headers(options.headers||{});headers.delete("Authorization");headers.delete("Cookie");headers.delete("Idempotency-Key");const response=await fetch(preferred+"/v1/"+path,{...timed(2500),headers,credentials:"omit"});if(response.ok||response.status===304)return response;throw Error("node unavailable");}
+      catch(error){if(options.signal?.aborted)throw error;this.failedUntil.set(preferred,Date.now()+30000);this.selected=this.hub;this.selectedId="hub";}
     }
-    return fetch(this.hub+"/v1/"+path,options);
+    return fetch(this.hub+"/v1/"+path,timed(12000));
   }
 }
 window.translationNetwork=new TranslationNetwork();

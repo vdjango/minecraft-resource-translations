@@ -9,7 +9,7 @@ let targetLanguage="zh-Hans",languageNames={"zh-Hans":"简体中文"};
 const languageName=()=>languageNames[targetLanguage]||targetLanguage;
 const originalLabel=t=>({project_name:"项目名称，保留原名",empty_content:"暂无正文内容",technical_content:"代码或版本信息，保留原文",already_target_language:"内容已是目标语言",unchanged:"内容无需改动"}[t.no_translation_reason]||"无需翻译，保留原文");
 let pageIndex=0,pageCursors=[null],listLoading=false;
-let session,sessionUntil=0,kind="",cursor=null,detail=null,detailSource=null,generation=0,listGeneration=0,lastTranslation=null;
+let session,sessionPending,sessionUntil=0,kind="",cursor=null,detail=null,detailSource=null,generation=0,listGeneration=0,lastTranslation=null;
 const sleep = ms => new Promise(resolve=>setTimeout(resolve,ms));
 const json = (data,headers={}) => ({method:"POST",headers:{"Content-Type":"application/json",...headers},body:JSON.stringify(data)});
 async function request(path,options={}) {
@@ -18,7 +18,10 @@ async function request(path,options={}) {
   if(!response.ok)throw Error(data.code||"请求失败");return data;
 }
 async function auth() {
-  if(!session||Date.now()>sessionUntil){const d=await request("sessions/anonymous",json({client_id:"buggcraft-web"}));session=d.access_token;sessionUntil=Date.now()+d.expires_in*1000-60000;}
+  if(!session||Date.now()>sessionUntil){
+    if(!sessionPending)sessionPending=request("sessions/anonymous",json({client_id:"buggcraft-web"})).then(d=>{session=d.access_token;sessionUntil=Date.now()+d.expires_in*1000-60000;}).finally(()=>{sessionPending=null;});
+    await sessionPending;
+  }
   return {"Content-Type":"application/json",Authorization:"Bearer "+session};
 }
 function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
@@ -46,6 +49,7 @@ function card(p){
 }
 async function load(append=false){
   const token=++listGeneration;listLoading=true;$("more").disabled=true;$("previous-page").disabled=true;$("projects").setAttribute("aria-busy","true");$("notice").textContent="正在读取资源…";
+  if(!$("projects").children.length)for(let i=0;i<3;i++){const placeholder=node("div",undefined,"loading-placeholder");placeholder.setAttribute("aria-hidden","true");$("projects").append(placeholder);}
   try{if(!append){pageIndex=0;pageCursors=[null];}const params=new URLSearchParams({limit:$("page-size").value,kind,q:$("query").value,target_language:targetLanguage});if(pageCursors[pageIndex])params.set("cursor",pageCursors[pageIndex]);const data=await request("catalog/search?"+params);if(token!==listGeneration)return;$("projects").replaceChildren();for(const p of data.projects)$("projects").append(card(p));cursor=data.next_cursor;$("more").disabled=!cursor;$("previous-page").disabled=pageIndex===0;$("page-info").textContent=`第 ${pageIndex+1} 页 / 共 ${Math.max(1,Math.ceil(data.total_count/Number($("page-size").value)))} 页`;$("count").textContent=`共 ${data.total_count} 个项目`;$("notice").textContent=data.projects.length?"":"暂无匹配项目，可通过项目 ID 收录资源。";translateVisible(data.projects,token);}catch(e){if(token===listGeneration){if(e.message==="cursor_expired"&&append){load();return;}$("notice").textContent="读取失败："+e.message;}}
   finally{if(token===listGeneration){listLoading=false;$("projects").setAttribute("aria-busy","false");$("more").disabled=!cursor;$("previous-page").disabled=pageIndex===0;}}
 }
@@ -53,12 +57,7 @@ async function translateVisible(projects,token){
   const items=projects.filter(p=>p.field_states?p.field_states.summary!=="ready":p.translation_state!=="ready").map((p,i)=>({request_id:String(i),resource:p.resource,fields:[{field:"summary",source_hash:p.summary_source_hash}]}));if(!items.length)return;
   const payload={target_language:targetLanguage,profile:"minecraft-v1",items};
   try{
-    const headers=await auth();
-    // A 50-row page needs three ensure batches; resolve accepts all 50 at once.
-    for(let start=0;start<items.length;start+=20){
-      if(token!==listGeneration)return;
-      await request("translations:ensure",json({...payload,items:items.slice(start,start+20),purpose:"visible_list"},{...headers,"Idempotency-Key":crypto.randomUUID()}));
-    }
+    let ensuring=false,ensureDone=false,ensureError="";
     for(let i=0;i<40&&token===listGeneration;i++){
       const d=await request("translations:resolve",json(payload));if(token!==listGeneration)return;let pending=false;
       for(const r of d.results)for(const f of r.fields){
@@ -66,11 +65,18 @@ async function translateVisible(projects,token){
           if(f.state==="ready"&&f.matches_request&&f.is_current){target.textContent=f.translation.text;target.closest(".card").querySelector(".translation-badge").textContent=f.translation.translation_required===false?"简介 · "+originalLabel(f.translation):languageName()+" · 简介已就绪";}
           else target.closest(".card").querySelector(".translation-badge").textContent=f.update?.notice||states[f.state]||"等待翻译";
         }
-        if(!["ready","failed","blocked"].includes(f.state))pending=true;
+        if(!(f.state==="ready"&&f.matches_request&&f.is_current)&&!["failed","blocked"].includes(f.state))pending=true;
       }
-      if(!pending)return;await sleep(2500);
+      if(!pending&&!d.results.some(r=>r.fields.some(f=>f.state==="failed"))){if(token===listGeneration)$("notice").textContent="";return;}
+      if(!ensuring){
+        ensuring=true;
+        // Cached translations render first. Queue submission cannot hold up resolve.
+        void (async()=>{const headers=await auth();for(let start=0;start<items.length&&token===listGeneration;start+=20)await request("translations:ensure",json({...payload,items:items.slice(start,start+20),purpose:"visible_list"},{...headers,"Idempotency-Key":crypto.randomUUID()}));})().catch(e=>{ensureError=e.message;}).finally(()=>{ensureDone=true;});
+      }
+      if(token===listGeneration)$("notice").textContent=ensureError?"译文暂时无法准备："+ensureError+"，可点击搜索重试。":"正在自动更新简介译文，原文仍可阅读…";
+      if(ensureDone&&!pending){if(token===listGeneration)$("notice").textContent=ensureError||"部分译文暂不可用，再次访问时会重试。";return;}await sleep(i<3?800:2500);
     }
-  }catch(_){/* Original content remains readable. */}
+  }catch(e){if(token===listGeneration)$("notice").textContent="译文读取失败："+e.message+"。原文仍可阅读，点击搜索重试。";}
 }
 async function refresh(resource,status){
   status.textContent="正在核验原文与项目信息…";const headers=await auth(),job=await request(`projects/${resource.provider}/${resource.project_id}/refresh`,{method:"POST",headers});
@@ -93,14 +99,15 @@ async function showDetail(resource){
     $("detail-title").textContent=source.fields.title.text;$("detail-provider").textContent=(resource.provider==="modrinth"?"Modrinth":"CurseForge")+" / "+labels[source.kind];$("original-link").href=source.source_url;$("translated-summary").textContent=source.fields.summary.text;$("original-summary").textContent=source.fields.summary.text;renderBody($("original-body"),source.fields.body.text,source.fields.body.format);renderMetadata(source);$("versions").textContent="当前原文版本："+source.snapshot_hash;
     renderBody($("translated-body"),source.fields.body.text,source.fields.body.format);
     request(`projects/${resource.provider}/${resource.project_id}/history`).then(h=>{if(token===generation)$("versions").textContent+="\n\n"+h.events.map(x=>date(x.observed_at)+"  "+({source_observed:"原文更新",metadata_updated:"项目信息更新",translation_published:"译文发布"}[x.type]||x.type)+(x.changed_fields?"  "+x.changed_fields.join(", "):"")).join("\n");}).catch(()=>{});
-    const payload={target_language:targetLanguage,profile:"minecraft-v1",items:[{request_id:"detail",resource,fields:["summary","body"].map(field=>({field,source_hash:source.fields[field].source_hash}))}]};let ensured=false;
+    const payload={target_language:targetLanguage,profile:"minecraft-v1",items:[{request_id:"detail",resource,fields:["summary","body"].map(field=>({field,source_hash:source.fields[field].source_hash}))}]};let ensured=false,ensureDone=false,ensureError="";
     for(let i=0;i<150&&token===generation&&$("detail-dialog").open;i++){
       const d=await request("translations:resolve",json(payload));if(token!==generation)return;let complete=true,failed=false,notice="",summaryReady=false,bodyReady=false;
       if(d.results[0].fields.some(f=>f.update?.action==="refresh_source")){ $("detail-status").textContent="原文已更新，正在读取新版本并更新译文";await sleep(700);if(token===generation)showDetail(resource);return; }
-      for(const f of d.results[0].fields){if(f.state==="ready"&&f.matches_request&&f.is_current){const target=f.field==="summary"?$("translated-summary"):$("translated-body");if(f.translation.text!==undefined)target.textContent=f.translation.text;else if(target.dataset.revision!==f.translation.translation_revision){const artifact=await request("artifacts/"+f.translation.artifact.artifact_sha256);if(token!==generation)return;renderBody(target,artifact.text,artifact.format);target.dataset.revision=f.translation.translation_revision;}if(f.field==="summary")summaryReady=true;if(f.field==="body"){$("body-language-label").textContent=f.translation.translation_required===false?originalLabel(f.translation):"AI · "+languageName();bodyReady=true;lastTranslation={resource,field:f.field,source_hash:f.requested_source_hash,translation_revision:f.translation.translation_revision};$("report").classList.toggle("hidden",f.translation.translation_required===false);}}else{complete=false;notice=f.update?.notice||states[f.state]||f.state;if(["failed","blocked"].includes(f.state))failed=true;}if(f.update?.notice)notice=f.update.notice;}
+      for(const f of d.results[0].fields){if(f.state==="ready"&&f.matches_request&&f.is_current){const target=f.field==="summary"?$("translated-summary"):$("translated-body");if(f.translation.text!==undefined){if(f.field==="body")renderBody(target,f.translation.text,f.translation.format||source.fields.body.format);else target.textContent=f.translation.text;}else if(target.dataset.revision!==f.translation.translation_revision){const artifact=await request("artifacts/"+f.translation.artifact.artifact_sha256);if(token!==generation)return;renderBody(target,artifact.text,artifact.format);target.dataset.revision=f.translation.translation_revision;}if(f.field==="summary")summaryReady=true;if(f.field==="body"){$("body-language-label").textContent=f.translation.translation_required===false?originalLabel(f.translation):"AI · "+languageName();bodyReady=true;lastTranslation={resource,field:f.field,source_hash:f.requested_source_hash,translation_revision:f.translation.translation_revision};$("report").classList.toggle("hidden",f.translation.translation_required===false);}}else{complete=false;notice=f.update?.notice||states[f.state]||f.state;if(["failed","blocked"].includes(f.state))failed=true;}if(f.update?.notice)notice=f.update.notice;}
       if(failed&&!lastTranslation)$("body-language-label").textContent="原文 · 译文暂不可用";
-      $("detail-status").textContent=complete?(d.results[0].fields.every(f=>f.translation?.translation_required===false)?"无需翻译 · 内容已就绪，保留原文":languageName()+" · 简介与正文已就绪 · 与当前原文一致"):summaryReady&&!bodyReady?"简介译文已就绪；正文："+(notice||"正在翻译，暂时显示原文"):notice||"正在翻译";if(complete||failed)return;
-      if(!ensured){const headers=await auth();headers["Idempotency-Key"]=crypto.randomUUID();await request("translations:ensure",json({...payload,purpose:"detail"},headers));ensured=true;}await sleep(i<5?1000:2500);
+      $("detail-status").textContent=complete?(d.results[0].fields.every(f=>f.translation?.translation_required===false)?"无需翻译 · 内容已就绪，保留原文":languageName()+" · 简介与正文已就绪 · 与当前原文一致"):summaryReady&&!bodyReady?"简介译文已就绪；正文："+(notice||"正在翻译，暂时显示原文"):notice||"正在翻译";if(complete)return;
+      if(!ensured){ensured=true;void (async()=>{const headers=await auth();if(token!==generation)return;headers["Idempotency-Key"]=crypto.randomUUID();await request("translations:ensure",json({...payload,purpose:"detail"},headers));})().catch(e=>{ensureError=e.message;}).finally(()=>{ensureDone=true;});}
+      if(ensureDone&&(failed||ensureError)){$("detail-status").textContent=(ensureError||notice||"译文暂不可用")+"；可点击刷新重试，原文仍可阅读。";return;}await sleep(i<5?1000:2500);
     }if(token===generation)$("detail-status").textContent="翻译继续在后台进行，可稍后再次查看。";
   }catch(e){if(token===generation)$("detail-status").textContent="暂时无法翻译："+e.message;}
 }
@@ -118,14 +125,17 @@ $("target-language").onchange=()=>{
   generation++;load();if($("detail-dialog").open&&detail)showDetail(detail);
 };
 async function initialize(){
+  let saved;try{saved=localStorage.getItem("buggcraft.translation.target-language");}catch(_){}
+  if(saved&&[...$("target-language").options].some(o=>o.value===saved)){targetLanguage=saved;$("target-language").value=saved;}
+  const initialLanguage=targetLanguage;
+  void load();
   try{
     const d=await request("capabilities");
     $("service-state").textContent=d.generation_available?"翻译服务在线":"译文查询在线 · 生成暂不可用";
     const languages=d.languages||[{code:"zh-Hans",name:"简体中文"}];languageNames=Object.fromEntries(languages.map(l=>[l.code,l.name]));
-    let saved;try{saved=localStorage.getItem("buggcraft.translation.target-language");}catch(_){}
     targetLanguage=languages.some(l=>l.code===saved)?saved:d.default_target_language||"zh-Hans";
     $("target-language").replaceChildren(...languages.map(l=>{const o=node("option",l.name);o.value=l.code;return o;}));$("target-language").value=targetLanguage;
   }catch(_){$("service-state").textContent="服务暂时无法连接";}
-  load();
+  if(targetLanguage!==initialLanguage)load();
 }
 initialize();

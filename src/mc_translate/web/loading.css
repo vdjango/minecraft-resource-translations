@@ -1,0 +1,5 @@
+.loading-placeholder{height:170px;border:1px solid var(--line,#d8d0e8);border-radius:12px;background:linear-gradient(100deg,transparent 20%,#9882bb18 50%,transparent 80%);background-size:200% 100%;animation:translation-loading 1.4s ease-in-out infinite}
+#projects[aria-busy="true"]{opacity:.7;transition:opacity .15s}
+#notice:not(:empty),#detail-status:not(:empty){min-height:1.6em}
+@keyframes translation-loading{to{background-position:-200% 0}}
+@media(prefers-reduced-motion:reduce){.loading-placeholder{animation:none}}
