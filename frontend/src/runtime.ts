@@ -1,5 +1,6 @@
-import { createApp, defineComponent, onMounted, onBeforeUnmount, h, reactive } from 'vue';
+import { createApp, defineComponent, onMounted, onBeforeUnmount, h, reactive, type Component } from 'vue';
 import { createViews } from './views';
+import { capturePageSeed } from './pageSeed';
 
 export type PageScope = ReturnType<typeof createScope>;
 export function createScope() {
@@ -11,6 +12,7 @@ export function createScope() {
   const exposed = new Map<string, unknown>();
   const cleanup = new Set<() => void>();
   const state = reactive({ pending: 0, error: '' });
+  const pending = () => window.dispatchEvent(new CustomEvent('buggcraft:page-pending',{detail:state.pending}));
   const scope = {
     state,
     setTimeout(handler: TimerHandler, delay?: number, ...args: unknown[]): number {
@@ -25,13 +27,13 @@ export function createScope() {
     clearInterval(id?: number) { window.clearInterval(id); if(id !== undefined)timers.delete(id); },
     async fetch(input: RequestInfo | URL, init: RequestInit = {}) {
       if(!active) throw new DOMException('Page closed', 'AbortError');
-      const controller = new AbortController(); controllers.add(controller); state.pending++;
+      const controller = new AbortController(); controllers.add(controller); state.pending++; pending();
       const supplied=init.signal||(input instanceof Request?input.signal:undefined);
       const signal=controller.signal;
       const forwardAbort=()=>controller.abort(supplied?.reason);
       const deadline=window.setTimeout(()=>controller.abort(new DOMException('Request timed out','TimeoutError')),25000);
       let finished=false;
-      const finish=()=>{if(!finished){finished=true;window.clearTimeout(deadline);supplied?.removeEventListener('abort',forwardAbort);controllers.delete(controller);state.pending--;}};
+      const finish=()=>{if(!finished){finished=true;window.clearTimeout(deadline);supplied?.removeEventListener('abort',forwardAbort);controllers.delete(controller);state.pending--;pending();}};
       signal.addEventListener('abort',finish,{once:true});
       if(supplied?.aborted)forwardAbort();else supplied?.addEventListener('abort',forwardAbort,{once:true});
       try {
@@ -72,18 +74,36 @@ export function createScope() {
   return scope;
 }
 
-export function mountPage(initialize: (scope:PageScope,views:ReturnType<typeof createViews>)=>void) {
+/** Mount the complete visible page; server HTML remains available before JS loads. */
+export function mountPage(initialize: (scope:PageScope,views:ReturnType<typeof createViews>)=>void, Page?:Component) {
   if(document.querySelector('[data-vue-page]'))return;
-  const host=document.createElement('span'); host.hidden=true; host.dataset.vuePage=''; document.body.append(host);
+  const seed=capturePageSeed();
+  const views=createViews();
+  const host=document.createElement('div');
+  host.className='vue-page-root'; host.dataset.vuePage='';
+  if(Page){host.style.display='contents';document.body.replaceChildren(host);}
+  else {host.hidden=true;document.body.append(host);}
   const application=createApp(defineComponent({
     setup() {
-      const scope=createScope(); const views=createViews();
-      onMounted(()=>{ try{initialize(scope,views);}catch(error){scope.state.error=String(error);console.error(error);const feedback=document.createElement('p');feedback.setAttribute('role','alert');feedback.textContent='页面初始化失败，请刷新页面后重试。';(document.querySelector('main')||document.body).prepend(feedback);document.dispatchEvent(new CustomEvent('page-initialization-error',{detail:String(error)}));} });
+      const scope=createScope();
+      onMounted(()=>{
+        seed.restore();
+        try{initialize(scope,views);}catch(error){
+          scope.state.error=String(error);console.error(error);
+          const feedback=document.createElement('p');feedback.setAttribute('role','alert');
+          feedback.textContent='Page initialization failed. Refresh and try again.';
+          (document.querySelector('main')||document.body).prepend(feedback);
+          document.dispatchEvent(new CustomEvent('page-initialization-error',{detail:String(error)}));
+        }
+      });
       onBeforeUnmount(()=>{scope.dispose();views.dispose();});
-      return ()=>h('span',{'data-pending':scope.state.pending});
+      return ()=>Page?h(Page,{seed:seed.state,views}):h('span',{'data-pending':scope.state.pending});
     },
   }));
   application.mount(host);
+  window.dispatchEvent(new Event('buggcraft:page-ready'));
+  const leave=()=>{application.unmount();host.remove();window.removeEventListener('pagehide',close);window.removeEventListener('buggcraft:before-navigate',leave);};
+  window.addEventListener('buggcraft:before-navigate',leave,{once:true});
   const close=(event:PageTransitionEvent)=>{if(!event.persisted){application.unmount();host.remove();window.removeEventListener('pagehide',close);}};
   window.addEventListener('pagehide',close);
 }

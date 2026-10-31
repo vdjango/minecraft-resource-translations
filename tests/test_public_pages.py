@@ -8,6 +8,38 @@ from mc_translate.public_pages import render_body
 
 
 class PublicPagesCase(PlatformFixture):
+    async def test_unified_platform_routes_and_shared_settings(self):
+        for old, target in (("/network", "/developers#network"),
+                            ("/admin/mirror", "/admin/settings#downloads"),
+                            ("/admin/model", "/admin/settings#translation")):
+            response = await self.client.get(old, allow_redirects=False)
+            self.assertEqual(response.status, 302)
+            self.assertEqual(response.headers["Location"], target)
+            self.assertIn("no-store", response.headers["Cache-Control"])
+        homepage = await (await self.client.get("/")).text()
+        self.assertIn('id="projects"', homepage)
+        self.assertIn('href="/mirror"', homepage)
+        self.assertNotIn('id="downloads"', homepage)
+        self.assertNotIn('游戏下载', homepage)
+        mirror = await self.client.get('/mirror', allow_redirects=False)
+        self.assertEqual(mirror.status, 200)
+        self.assertIn('id="mirror-connect"', await mirror.text())
+        settings = await (await self.client.get("/admin/settings")).text()
+        self.assertIn('id="settings"', settings)
+        self.assertIn('id="mirror-settings"', settings)
+        self.assertEqual(settings.count('id="admin-access"'), 1)
+        self.assertIn('id="panel" class="hidden"', settings)
+        self.assertIn('noindex', (await self.client.get('/admin/settings')).headers['X-Robots-Tag'])
+
+    async def test_live_bootstrap_does_not_need_browser_health_round_trip(self):
+        first = await (await self.client.get('/')).text()
+        self.assertIn('<meta name="translation-hub" content="http://localhost">', first)
+        self.assertIn('id="service-state">翻译服务在线', first)
+        self.config.api_key = ''
+        second = await (await self.client.get('/')).text()
+        self.assertIn('id="service-state">译文查询在线 · 生成暂不可用', second)
+        self.assertNotIn('id="service-state">翻译服务在线', second)
+
     async def translated(self):
         for name in ("summary", "body"):
             task = await self.ensure(self.payload(name), key="seo-ready-" + name)
@@ -74,6 +106,10 @@ class PublicPagesCase(PlatformFixture):
             self.assertNotIn(text, clean)
         self.assertIn('<h2>Heading</h2>', clean)
         self.assertIn('loading="lazy"', clean)
+        self.assertIn('decoding="async"', clean)
+        dimensions = render_body('<img src="https://a.test/p.png" width="640" height="360">', "html")
+        self.assertIn('width="640" height="360"', dimensions)
+        self.assertNotIn('width=', render_body('<img width="' + "9" * 5000 + '">', "html"))
         await self.translated()
         response = await self.client.get("/projects/modrinth/Fixture01?target_language=ja")
         self.assertNotIn("一个快速的模组", await response.text())

@@ -33,6 +33,8 @@ class FederationCase(PlatformFixture):
     async def mirror(self, approve=True):
         directory = tempfile.TemporaryDirectory()
         self.node_directories.append(directory)
+        # Federation protocol tests exercise a previously configured node.
+        (Path(directory.name)/'installation.json').write_text('{"complete":true,"sections":[]}')
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             port = probe.getsockname()[1]
@@ -73,6 +75,9 @@ class FederationCase(PlatformFixture):
         ensured=await self.ensure()
         await self.done(ensured['results'][0]['tickets'][0]['job_id'])
         mirror=await self.mirror()
+        html = await (await mirror.get('/')).text()
+        self.assertIn('name="translation-hub" content="' + self.config.public_url + '"', html)
+        self.assertIn('id="service-state">译文节点在线', html)
         response=await mirror.post('/v1/translations:resolve',json=self.payload(),headers={'Authorization':'Bearer bct_caller-secret-never-forwarded'})
         self.assertEqual(response.status,200,await response.text())
         result=await response.json()

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import base64
 import hashlib
 import hmac
@@ -15,6 +16,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 from jsonschema import Draft202012Validator
 
 from .config import Config
+from .admin_account import AdminAccount, verify_password
 from .engine import TERMINAL, Engine
 from .federation import Federation
 from .hashing import canonical, digest, resource_key, resource_ref
@@ -78,34 +80,12 @@ async def observe(request, handler):
 @web.middleware
 async def boundary(request, handler):
     try:
-        token = request.headers.get("Authorization", "").removeprefix("Bearer ")
-        federation = request.app["federation"]
-        if federation.config.federation_role == "mirror" and Federation.mirror_read(request.path, request.method):
-            response = await federation.proxy(request)
+        installation = request.app.get('installation')
+        gate = installation.gate(request) if installation and request.method!='OPTIONS' else None
+        if gate is not None:
+            response = gate
         else:
-            response = None
-        if response is None and token.startswith("bcn_") and not request.path.startswith("/v1/federation/"):
-            node = await federation.node_auth(request)
-            if node["state"] != "active":
-                raise ApiError("node_not_active", 403)
-            request["federation_node"] = node["id"]
-        if response is None and token.startswith("bct_") and not request.path.startswith("/v1/admin/"):
-            client = await request.app["store"].one(
-                "SELECT * FROM client_keys WHERE hash=?", (key_hash(token),)
-            )
-            if not client:
-                raise ApiError("invalid_client_key", 401)
-            request["client_key"] = client
-            if (
-                request.path != "/v1/clients/application"
-                and client["state"] != "active"
-            ):
-                raise ApiError("client_key_" + client["state"], 403)
-            request.app["api"].client_rate(client)
-        if response is None:
-            if federation.config.federation_role == "mirror" and request.path.startswith("/v1/") and not request.path.startswith(("/v1/admin/", "/v1/federation/")):
-                return web.json_response(dict(code="hub_required", hub_url=federation.hub), status=409, headers={"Access-Control-Allow-Origin": "*"})
-            response = await handler(request)
+            response = await dispatch(request, handler)
     except ApiError as exc:
         response = web.json_response(error(exc.code, exc.retry), status=exc.status)
         if exc.retry:
@@ -117,10 +97,46 @@ async def boundary(request, handler):
         )
     except (ValueError, TypeError, KeyError):
         response = web.json_response(error("invalid_request"), status=400)
+    return secure_response(request, response)
+
+
+async def dispatch(request, handler):
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+    federation = request.app["federation"]
+    if federation.config.federation_role == "mirror" and Federation.mirror_read(request.path, request.method):
+        response = await federation.proxy(request)
+    else:
+        response = None
+    if response is None and token.startswith("bcn_") and not request.path.startswith("/v1/federation/"):
+        node = await federation.node_auth(request)
+        if node["state"] != "active":
+            raise ApiError("node_not_active", 403)
+        request["federation_node"] = node["id"]
+    if response is None and token.startswith("bct_") and not request.path.startswith("/v1/admin/"):
+        client = await request.app["store"].one(
+            "SELECT * FROM client_keys WHERE hash=?", (key_hash(token),)
+        )
+        if not client:
+            raise ApiError("invalid_client_key", 401)
+        request["client_key"] = client
+        if (
+            request.path != "/v1/clients/application"
+            and client["state"] != "active"
+        ):
+            raise ApiError("client_key_" + client["state"], 403)
+        request.app["api"].client_rate(client)
+    if response is None:
+        if federation.config.federation_role == "mirror" and request.path.startswith("/v1/") and not request.path.startswith(("/v1/admin/", "/v1/federation/", "/v1/setup/")):
+            return web.json_response(dict(code="hub_required", hub_url=federation.hub), status=409, headers={"Access-Control-Allow-Origin": "*"})
+        response = await handler(request)
+    return response
+
+
+def secure_response(request, response):
     response.headers.setdefault("Cache-Control", "no-store")
     if request.path.startswith("/assets/") and request.path.endswith((".js", ".css", ".png", ".svg", ".ico")):
         response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
-        if re.fullmatch(r"/assets/vue-runtime-[A-Za-z0-9_-]+\.js", request.path):
+        if re.fullmatch(r"/assets/vue-runtime-[A-Za-z0-9_-]+\.js", request.path) or re.fullmatch(r"[a-f0-9]{12}", request.query.get('v', '')):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     if request.path == "/developers" or request.path == "/v1/clients/applications":
         response.set_cookie("translation_device", request.app["api"].device(request), max_age=31536000, httponly=True, secure=request.app["api"].config.public_url.startswith("https:"), samesite="Lax")
@@ -130,7 +146,7 @@ async def boundary(request, handler):
     )
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
     response.headers["X-Content-Type-Options"] = "nosniff"
-    if request.path.startswith(("/admin", "/v1/")) or request.path.startswith("/assets/") and request.path.endswith(".html"):
+    if request.path.startswith(("/admin", "/v1/")) or request.path=='/setup' or request.path.startswith("/assets/") and request.path.endswith(".html"):
         response.headers["X-Robots-Tag"] = "noindex, nofollow"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = (
@@ -151,7 +167,12 @@ class API:
         self.settings = Settings(config)
         self.event_streams = 0
         self.model_lists = OrderedDict()
+        self.model_refreshes = {}
         self.admin_sessions = {}
+        self.admin_accounts = AdminAccount(Path(config.database).parent / 'admin.json',config.public_url,legacy=bool(config.admin_token))
+        if not self.admin_accounts.initialized and not config.admin_token:
+            logging.getLogger(__name__).warning('First installation: open the website to configure your administrator and platform in /setup')
+        self.admin_login_lock = asyncio.Lock()
         self.cursor_key = hashlib.sha256(
             (config.admin_token or secrets.token_hex(32)).encode()
         ).digest()
@@ -224,13 +245,44 @@ class API:
         self.rate(request, "admin", 60)
         token = request.headers.get("Authorization", "").removeprefix("Bearer ")
         session = self.admin_sessions.get(key_hash(request.cookies.get("translation_admin", "")))
-        cookie_auth = session and session[0] > time.time() and session[1] == key_hash(self.config.admin_token)
-        if not self.config.admin_token or not (hmac.compare_digest(token, self.config.admin_token) or cookie_auth):
+        cookie_auth = session and session[0] > time.time() and session[1] == self.admin_identity()
+        token_auth = bool(self.config.admin_token) and hmac.compare_digest(token, self.config.admin_token)
+        if not (token_auth or cookie_auth):
             raise ApiError("unauthorized", 401)
-        if cookie_auth and request.method == "POST":
+        if cookie_auth and request.method in ("POST", "DELETE"):
             origin = request.headers.get("Origin")
             if origin and origin not in (self.config.public_url.rstrip("/"), request.scheme + "://" + request.host):
                 raise ApiError("invalid_origin", 403)
+
+    def admin_identity(self):
+        return key_hash(self.admin_accounts.state.get('admin_hash') or self.config.admin_token)
+
+    async def admin_setup(self,request):
+        self.rate(request,'admin_setup',8,300)
+        origin=request.headers.get('Origin')
+        if origin and origin not in (self.config.public_url.rstrip('/'),request.scheme+'://'+request.host):
+            raise ApiError('invalid_origin',403)
+        if self.admin_login_lock.locked():raise ApiError('authentication_busy',429,2)
+        data=await request.json()
+        async with self.admin_login_lock:
+            try:
+                await asyncio.to_thread(self.admin_accounts.complete,request.headers.get('X-Admin-Setup',''),data.get('username'),data.get('password'),data.get('password_confirm'))
+            except PermissionError:
+                raise ApiError('invalid_setup',403)
+            except ValueError:
+                raise ApiError('invalid_credentials',400)
+            self.admin_sessions.clear()
+        return self.admin_cookie()
+
+    def admin_cookie(self):
+        sid=secrets.token_urlsafe(32)
+        self.admin_sessions={k:v for k,v in self.admin_sessions.items() if v[0]>time.time()}
+        if len(self.admin_sessions)>=100:self.admin_sessions.pop(next(iter(self.admin_sessions)))
+        self.admin_sessions[key_hash(sid)]=(time.time()+8*3600,self.admin_identity())
+        response=web.json_response(dict(authenticated=True))
+        response.set_cookie('translation_admin',sid,max_age=8*3600,path='/',httponly=True,secure=self.config.public_url.startswith('https:'),samesite='Strict')
+        response.headers.add('Set-Cookie','translation_admin=; Max-Age=0; Path=/v1/admin; HttpOnly; SameSite=Strict'+('; Secure' if self.config.public_url.startswith('https:') else ''))
+        return response
 
     async def admin_session(self, request):
         if request.method == "GET":
@@ -239,18 +291,22 @@ class API:
         if request.method == "DELETE":
             self.admin_sessions.pop(key_hash(request.cookies.get("translation_admin", "")), None)
             response = web.json_response(dict(authenticated=False))
-            response.del_cookie("translation_admin", path="/v1/admin")
+            response.del_cookie("translation_admin", path="/")
+            response.headers.add('Set-Cookie','translation_admin=; Max-Age=0; Path=/v1/admin; HttpOnly; SameSite=Strict')
             return response
-        self.require_admin(request)
-        response = web.json_response(dict(authenticated=True))
         if request.method == "POST":
-            sid = secrets.token_urlsafe(32)
-            self.admin_sessions = {k:v for k,v in self.admin_sessions.items() if v[0] > time.time()}
-            if len(self.admin_sessions) >= 100:
-                self.admin_sessions.pop(next(iter(self.admin_sessions)))
-            self.admin_sessions[key_hash(sid)] = (time.time() + 3600, key_hash(self.config.admin_token))
-            response.set_cookie("translation_admin", sid, max_age=3600, path="/v1/admin", httponly=True, secure=self.config.public_url.startswith("https:"), samesite="Strict")
-        return response
+            if request.headers.get('Authorization'):
+                self.require_admin(request)
+            else:
+                self.rate(request,'admin_login',8,300)
+                origin=request.headers.get('Origin')
+                if origin and origin not in (self.config.public_url.rstrip('/'),request.scheme+'://'+request.host):raise ApiError('invalid_origin',403)
+                data=await request.json()
+                if self.admin_login_lock.locked():raise ApiError('authentication_busy',429,2)
+                async with self.admin_login_lock:
+                    valid=await asyncio.to_thread(verify_password,data.get('password'),self.admin_accounts.state.get('admin_hash',''))
+                if not valid or data.get('username')!=self.admin_accounts.state.get('admin_user'):raise ApiError('unauthorized',401)
+            return self.admin_cookie()
 
     def device(self, request):
         cookie = request.cookies.get("translation_device", "")
@@ -324,12 +380,29 @@ class API:
         cached = self.model_lists.get(identity)
         if cached and cached[0] > time.monotonic():
             return web.json_response(dict(models=cached[1]))
+        # A slow provider must not hold up repeat visits. Coalesce cold reads
+        # and refresh an expired directory in the background.
+        task = self.model_refreshes.get(identity)
+        if task is None:
+            task = asyncio.create_task(self.refresh_model_list(identity, candidate))
+            self.model_refreshes[identity] = task
+            def finished(done):
+                self.model_refreshes.pop(identity, None)
+                if not done.cancelled():
+                    done.exception()  # An expired cache may have no waiting client.
+            task.add_done_callback(finished)
+        if cached:
+            return web.json_response(dict(models=cached[1], stale=True))
+        models = await asyncio.shield(task)
+        return web.json_response(dict(models=models))
+
+    async def refresh_model_list(self, identity, candidate):
         try:
             async with self.app["http"].get(
                 candidate.base_url.rstrip("/") + "/models",
                 headers={"Authorization": "Bearer " + candidate.api_key},
                 allow_redirects=False,
-                timeout=ClientTimeout(total=15, connect=5),
+                timeout=ClientTimeout(total=6, connect=3),
             ) as response:
                 if response.status != 200:
                     raise ApiError("model_list_unavailable", 502, 30)
@@ -348,10 +421,10 @@ class API:
                 raise ValueError()
         except (ClientError, TimeoutError, ValueError, KeyError, TypeError):
             raise ApiError("model_list_unavailable", 502, 30)
-        self.model_lists[identity] = (time.monotonic() + 60, models)
+        self.model_lists[identity] = (time.monotonic() + 600, models)
         while len(self.model_lists) > 4:
             self.model_lists.popitem(last=False)
-        return web.json_response(dict(models=models))
+        return models
 
     @staticmethod
     def public_client(row):
@@ -1552,7 +1625,7 @@ class API:
         if cursor:
             where += " AND (created<? OR (created=? AND id<?))"
             params.extend((cursor["created"], cursor["created"], cursor["id"]))
-        rows = await self.store.rows("SELECT id,model,status,tokens,input_tokens,cached_tokens,output_tokens,cost,currency,created,actual,details_known FROM usage WHERE " + where + " ORDER BY created DESC,id DESC LIMIT 101", params)
+        rows = await self.store.rows("SELECT id,model,status,tokens,input_tokens,cached_tokens,output_tokens,write_tokens,cost_basis,cost,currency,created,actual,details_known FROM usage WHERE " + where + " ORDER BY created DESC,id DESC LIMIT 101", params)
         summary = await self.store.one("SELECT COALESCE(SUM(tokens),0) AS tokens,COUNT(*) AS calls,SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,SUM(CASE WHEN status IN ('pending','unknown') THEN 1 ELSE 0 END) AS unconfirmed,COALESCE(SUM(cost),0) AS cost,SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS cost_unknown FROM usage WHERE " + column + "=?", (key,))
         next_cursor = self.page_cursor({"created":rows[99]["created"],"id":rows[99]["id"]},filters) if len(rows)>100 else None
         return web.json_response({"period":period,"key":key,"calls":[dict(row) for row in rows[:100]],"next_cursor":next_cursor,"summary":summary,"currency":"USD"})
@@ -1574,6 +1647,7 @@ async def create_app(
     mail_sender=None,
 ):
     config = config or Config.from_env()
+    Settings(config)  # Load persisted site identity before constructing its clients.
     app = web.Application(middlewares=[observe, boundary], client_max_size=65536)
     store = await Store(config.database).open()
     traffic = await Traffic(store).open()
@@ -1601,6 +1675,19 @@ async def create_app(
     from .public_pages import PublicPages
 
     public_pages = PublicPages(api, ROOT / "web")
+    from .mirror_control import MirrorControl
+    mirror_control = MirrorControl(api)
+    from .installation import Installation
+    installation = Installation(api, mirror_control, public_pages)
+    app['installation'] = installation
+    app.router.add_get('/setup', installation.page)
+    app.router.add_get('/v1/setup/status', installation.status)
+    app.router.add_post('/v1/setup/account', installation.account)
+    app.router.add_post('/v1/setup/configure', installation.configure)
+    app.router.add_post('/v1/setup/finish', installation.finish)
+    app.router.add_get('/v1/admin/mirror', mirror_control.admin)
+    app.router.add_post('/v1/admin/mirror', mirror_control.admin)
+    app.router.add_get('/mirror-api/status', mirror_control.status)
     app.router.add_get("/v1/capabilities", api.capabilities)
     app.router.add_post("/v1/sessions/anonymous", api.session)
     app.router.add_post("/v1/translations:resolve", api.resolve)
@@ -1638,6 +1725,7 @@ async def create_app(
     app.router.add_get("/v1/admin/clients", api.admin_clients)
     app.router.add_post("/v1/admin/clients", api.admin_clients)
     app.router.add_post("/v1/admin/session", api.admin_session)
+    app.router.add_post("/v1/admin/setup", api.admin_setup)
     app.router.add_get("/v1/admin/session", api.admin_session)
     app.router.add_delete("/v1/admin/session", api.admin_session)
     app.router.add_post("/v1/clients/applications", api.client_apply)
@@ -1653,11 +1741,20 @@ async def create_app(
         "/health", lambda r: web.json_response(dict(status="ok", version="0.1.0"))
     )
     app.router.add_route("OPTIONS", "/{path:.*}", lambda r: web.Response(status=204))
+    # Compatibility URLs lead into the unified platform, including settings.
+    for old, target in (("/network", "/developers#network"),
+                        ("/admin/model", "/admin/settings#translation")):
+        async def platform_redirect(request, target=target):
+            return web.Response(status=302, headers={"Location": target, "Cache-Control": "no-store"})
+        app.router.add_get(old, platform_redirect)
     for route, file in (
         ("/", "index.html"),
+        ("/mirror", "mirror.html"),
         ("/docs", "docs.html"),
         ("/admin", "admin.html"),
-        ("/admin/model", "admin-model.html"),
+        ("/admin/setup", "admin.html"),
+        ("/admin/settings", "admin-model.html"),
+        ("/admin/mirror", "admin-mirror.html"),
         ("/admin/mail", "admin-mail.html"),
         ("/admin/clients", "admin-clients.html"),
         ("/admin/tasks", "admin-tasks.html"),
@@ -1666,10 +1763,19 @@ async def create_app(
         ("/admin/nodes", "admin-nodes.html"),
         ("/admin/feedback", "admin-feedback.html"),
         ("/developers", "developers.html"),
-        ("/network", "network.html"),
     ):
 
         async def page(request, file=file):
+            if request.path.startswith('/admin'):
+                account=api.admin_accounts
+                mode='setup' if request.path=='/admin/setup' or not(account.initialized or config.admin_token) else 'login' if account.initialized else 'legacy'
+                session=api.admin_sessions.get(key_hash(request.cookies.get('translation_admin','')))
+                authorized=bool(session and session[0]>time.time() and session[1]==api.admin_identity())
+                if authorized and request.path!='/admin/setup':mode='session'
+                html=(ROOT/'web'/file).read_text(encoding='utf-8').replace('{{AUTH_MODE}}',mode).replace('{{AUTH_TITLE}}','设置管理员账户' if mode=='setup' else '登录管理工作台')
+                if mode=='session':
+                    html=html.replace('id="admin-access"','id="admin-access" hidden').replace('id="panel" class="hidden"','id="panel"').replace('id="logout" type="button" class="secondary hidden"','id="logout" type="button" class="secondary"')
+                return public_pages.response(request,html)
             return await public_pages.page(request, file)
 
         app.router.add_get(route, page)
@@ -1681,6 +1787,7 @@ async def create_app(
     app.router.add_static("/assets", ROOT / "web", show_index=False)
 
     async def startup(app):
+        await mirror_control.start()
         await traffic.start()
         await federation.start()
         await mail.start()
@@ -1688,6 +1795,10 @@ async def create_app(
             await engine.start()
 
     async def cleanup(app):
+        await mirror_control.close()
+        for task in list(api.model_refreshes.values()):
+            task.cancel()
+        await asyncio.gather(*list(api.model_refreshes.values()), return_exceptions=True)
         await mail.close()
         await engine.close()
         await federation.close()

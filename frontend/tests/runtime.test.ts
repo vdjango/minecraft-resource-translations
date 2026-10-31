@@ -1,5 +1,6 @@
 import {afterEach,describe,expect,it,vi} from 'vitest';
 import {createScope,mountPage} from '../src/runtime';
+import {defineComponent,h,nextTick} from 'vue';
 
 afterEach(()=>{
   window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false}));
@@ -9,6 +10,16 @@ afterEach(()=>{
 });
 
 describe('page lifecycle',()=>{
+  it('mounts visible page content and preserves the server detail while a request stalls',async()=>{
+    document.body.innerHTML='<main id="project-page"><h1>Server title</h1><div id="project-body"><p>Translated content</p></div></main>';
+    const Page=defineComponent({props:['seed'],setup:props=>()=>h('main',{id:'project-page'},[h('h1',props.seed.title),h('div',{id:'project-body',innerHTML:props.seed.body})])});
+    const initialize=vi.fn();
+    mountPage(initialize,Page);await nextTick();
+    expect(document.querySelector('[data-vue-page] main h1')?.textContent).toBe('Server title');
+    expect(document.getElementById('project-body')?.textContent).toBe('Translated content');
+    expect(document.querySelector('[data-vue-page]')?.hasAttribute('hidden')).toBe(false);
+    expect(initialize).toHaveBeenCalledOnce();
+  });
   it('cancels timers, global listeners and resource subscriptions when closed',()=>{
     vi.useFakeTimers();
     const scope=createScope(), callback=vi.fn(), cleanup=vi.fn();

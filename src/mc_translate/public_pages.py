@@ -17,10 +17,10 @@ from .hashing import resource_ref
 from .languages import DEFAULT_LANGUAGE, LANGUAGES, normalize_language
 
 LABELS = dict(mod="模组", resourcepack="资源包", shader="光影", modpack="整合包")
-PUBLIC = {"index.html": ("Minecraft 模组、光影与资源包翻译 · Buggcraft", "共享 Minecraft 模组、资源包、光影与整合包的多语言介绍，保留原版排版，支持启动器自动查询与社区翻译节点。"),
-          "docs.html": ("开放接口与启动器接入文档 · Buggcraft Translate", "资源翻译 API 文档：批量查询、自动翻译、原文版本更新、社区节点分发，以及 Java、C、C++、C#、Python 接入示例。"),
-          "network.html": ("社区翻译节点 · Buggcraft Translate", "部署并加入 Buggcraft 社区翻译网络，就近读取共享译文，支持节点测速、缓存及主服务回退。"),
-          "developers.html": ("申请启动器接入 · Buggcraft Translate", "为 Minecraft 启动器申请资源翻译 API 密钥，自动读取共享译文并跟踪原文更新。")}
+PUBLIC = {"index.html": ("共享译文库与镜像源 · Buggcraft", "浏览 Minecraft 项目共享译文，按需接入独立镜像源。"),
+          "mirror.html": ("Minecraft 镜像源 · Buggcraft", "为 Minecraft 启动器提供游戏核心、加载器、Java、依赖库与 assets 资源镜像，支持多节点分发、来源映射及共享译文接入。"),
+          "docs.html": ("镜像源与译文 API 开发文档 · Buggcraft", "接入 Minecraft 镜像源与共享译文，了解来源映射、缓存策略、多节点分发、独立部署及多语言接口示例。"),
+          "developers.html": ("开发者中心与服务节点 · Buggcraft", "接入 Minecraft 资源与译文服务，部署并加入社区节点，为启动器申请独立翻译生成额度。")}
 
 
 def metadata(title, description, url):
@@ -37,12 +37,14 @@ def render_body(text, format):
     html = MarkdownIt("commonmark", {"html": True}).enable("table").render(text) if format == "markdown" else text
     tags = set(bleach.sanitizer.ALLOWED_TAGS) | {"p", "div", "span", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "img", "table", "thead", "tbody", "tr", "th", "td", "details", "summary", "del", "s", "kbd"}
     def attr(tag, name, value):
+        if tag == "img" and name in ("width", "height"):
+            return len(value) <= 5 and value.isascii() and value.isdigit() and 0 < int(value) <= 10000
         if name in ("alt", "title", "colspan", "rowspan"):
             return True
         # HTTPS media only; links may be relative to the original source.
         return name == "href" or name == "src" and value.startswith("https://")
     clean = bleach.clean(html, tags=tags, attributes=attr, protocols={"https", "http", "mailto"}, strip=True)
-    return clean.replace("<img ", '<img loading="lazy" referrerpolicy="no-referrer" ')
+    return clean.replace("<img ", '<img loading="lazy" decoding="async" referrerpolicy="no-referrer" ')
 
 
 def source_link(url, label):
@@ -67,6 +69,12 @@ class PublicPages:
         self.cache, self.cache_bytes = OrderedDict(), 0
 
     def response(self, request, text, content_type="text/html", status=200, cache=False):
+        if content_type == "text/html" and status == 200:
+            # Bootstrap from this live response, independent of the cached page body.
+            # A mirror can route writes safely without probing the hub first.
+            service = '译文节点在线' if self.api.config.federation_role == 'mirror' else '翻译服务在线' if self.api.config.api_key else '译文查询在线 · 生成暂不可用'
+            text = text.replace('</head>', '<meta name="translation-hub" content="' + escape(self.base, quote=True) + '"></head>', 1)
+            text = text.replace('id="service-state">正在连接翻译服务', 'id="service-state">' + service)
         body = text.encode("utf-8")
         etag = '"' + hashlib.sha256(body).hexdigest() + '"'
         # The deployed CDN enforces a long browser TTL for cacheable responses.
@@ -78,9 +86,9 @@ class PublicPages:
         response.enable_compression()
         return response
 
-    async def cached(self, key, build):
+    async def cached(self, key, build, *, ttl=30, versioned=True):
         entry = self.cache.get(key)
-        if entry and entry[0] == self.store.version and entry[1] > time.monotonic():
+        if entry and (not versioned or entry[0] == self.store.version) and entry[1] > time.monotonic():
             self.cache.move_to_end(key)
             return entry[2]
         version = self.store.version
@@ -90,7 +98,7 @@ class PublicPages:
         if old:
             self.cache_bytes -= old[3]
         if size <= 2 * 1024 * 1024 and version == self.store.version:
-            self.cache[key] = (version, time.monotonic() + 30, text, size)
+            self.cache[key] = (version, time.monotonic() + ttl, text, size)
             self.cache_bytes += size
         while len(self.cache) > 128 or self.cache_bytes > 8 * 1024 * 1024:
             self.cache_bytes -= self.cache.popitem(last=False)[1][3]
@@ -122,6 +130,11 @@ class PublicPages:
             response = self.response(request, await build())
             response.headers["X-Robots-Tag"] = "noindex, follow"
             return response
+        # The catalogue is a read-heavy public entry point. A short independent
+        # cache keeps task progress from rebuilding the full SSR card list on
+        # every hit, while the five-second bound keeps new translations visible.
+        if file == "index.html":
+            return self.response(request, await self.cached(file, build, ttl=5, versioned=False), cache=True)
         return self.response(request, await self.cached(file, build), cache=True)
 
     async def project(self, request):
@@ -173,7 +186,7 @@ class PublicPages:
         return self.xml(request, [self.base + "/sitemaps/pages.xml"] + [self.base + f"/sitemaps/projects-{n}.xml" for n in range(1, math.ceil(count / 1000) + 1)], index=True)
 
     async def sitemap_pages(self, request):
-        return self.xml(request, [self.base + path for path in ("/", "/docs", "/network", "/developers")])
+        return self.xml(request, [self.base + path for path in ("/", "/mirror", "/docs", "/developers")])
 
     async def sitemap_projects(self, request):
         page = int(request.match_info["page"])

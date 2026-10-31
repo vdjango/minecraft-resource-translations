@@ -47,6 +47,8 @@ class Config:
     federation_cache_mb: int = 512
     # Test-only opt-in for private-network laboratories; production stays HTTPS.
     federation_allow_private: bool = False
+    mirror_root: str = "G:/BuggcraftMirror" if os.name == "nt" and Path("G:/").exists() else "data/game-mirror"
+    mirror_port: int = 18449
 
     @classmethod
     def from_env(cls):

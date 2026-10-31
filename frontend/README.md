@@ -1,21 +1,14 @@
-# Minecraft Resource Translations frontend
+# Web frontend
 
-Vue 3 and Vite compile the existing server-rendered pages to browser-ready JavaScript modules. The HTML, CSS, text, route URLs and page structure remain in the original web directory (`src/mc_translate/web`). Vue renders only the list areas that have been migrated to components; the other established controllers run in a Vue-managed page lifecycle while they are moved incrementally.
-
-FastAPI is not introduced: existing aiohttp API, authentication, database, queue and routes stay as-is.
-
-## Build and test
-
-Requirements: Node.js 20.19 or newer. Run from this directory:
+Vue 3、TypeScript 和 Vite。`src/pages/` 包含统一资源首页、详情、开发文档、开发者中心和管理后台。`ResourceDownloads.vue` 提供首页下载区域，`ServiceNetwork.vue` 统一展示节点能力与加入步骤；`AdminAccess.vue` 管理账户表单，`Catalog.vue` 管理资源卡片。
 
 ```sh
 npm ci
+python ../scripts/render_platform_pages.py
 npm run build
 npm test
 ```
 
-`npm run dev` rebuilds entries when source changes; run the existing Python service separately to view those assets.
+构建产物写入 `../src/mc_translate/web/`，页面模板自动更新资源版本号。部署时一起发布模板、`vue-*.js` 和样式。服务端输出列表与详情首屏，Vue 接管时保留已有译文、筛选状态和会话显示，避免空白后再次加载。
 
-The build writes compiled entries beside the existing assets, does not delete CSS or HTML, and updates each module URL with a content revision so a browser does not keep an old entry. Shared runtime chunks use immutable hash names. Node is a build-time dependency only; it is not needed by the deployed Python service.
-
-`pages.json` (and `pages.site.json`) lists the original page controllers included in each module. `src/controllers/` holds the compatibility bridges for the resource catalogue, release records and node network list. The original public JavaScript files remain available for old or cached HTML. `src/runtime.ts` owns page-scoped event handlers, polling timers, request timeouts/cancellation, mounted Vue views and cleanup.
+`pages.json` 定义页面入口和接口控制模块；请求、计时器和全局监听由页面生命周期统一回收。修改布局请编辑 `src/pages/*.vue`，用 `render_platform_pages.py` 更新首屏 HTML，再构建。导航由 `navigation.json` 统一维护，生成器只替换网站导航，不覆盖页面内的设置页签。后台设置在 `/admin/settings` 分页签展示，旧地址兼容跳转。不要直接修改生成的 JavaScript。文档代码示例使用 `v-pre`，服务端已清洗的资源正文通过 `v-html` 显示。

@@ -106,6 +106,17 @@ class Handler(BaseHTTPRequestHandler):
                         else None,
                     )
                 )
+            if url.path.endswith("/detail"):
+                # The browser reads source and initial translation state together.
+                return self.send(dict(source=SOURCE, fields=[
+                    dict(field="summary", requested_source_hash="sha256:summary",
+                         state="ready", matches_request=True, is_current=True,
+                         translation=dict(text="中文简介", format="plain"),
+                         update=dict(notice="", action="none")),
+                    dict(field="body", requested_source_hash="sha256:body",
+                         state="running", matches_request=False, is_current=True,
+                         update=dict(notice="原文已更新，正在翻译新版本", action="ensure")),
+                ]))
             if url.path.endswith("/source"):
                 return self.send(SOURCE)
             if url.path.endswith("/history"):

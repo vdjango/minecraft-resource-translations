@@ -17,7 +17,7 @@ async function readProject(allowEnsure=true){
       if(generation!==projectGeneration)return;
       for(const f of data.fields){const source=data.source.fields[f.field],translated=f.state==="ready"&&f.is_current&&f.translation,text=translated?translated.text:source.text;
         if(f.field==="summary")document.getElementById("project-summary").textContent=text;
-        else{const body=document.getElementById("project-body");body.lang=translated?language:"und";body.innerHTML=DOMPurify.sanitize((translated?.format||source.format)==="html"?text:projectMd.render(text),{FORBID_TAGS:["style","script","iframe","object","embed","svg","math","form","input","button"],FORBID_ATTR:["style","srcset"]});for(const img of body.querySelectorAll("img")){img.loading="lazy";img.referrerPolicy="no-referrer";}}
+        else{const body=document.getElementById("project-body");body.lang=translated?language:"und";body.innerHTML=DOMPurify.sanitize((translated?.format||source.format)==="html"?text:projectMd.render(text),{FORBID_TAGS:["style","script","iframe","object","embed","svg","math","form","input","button"],FORBID_ATTR:["style","srcset"]});for(const img of body.querySelectorAll("img")){img.loading="lazy";img.decoding="async";img.referrerPolicy="no-referrer";}}
       }
       const ready=data.fields.every(f=>f.state==="ready"&&f.is_current);
       projectStatus.textContent=ready?projectLanguage.selectedOptions[0].textContent+" · 简介与正文已就绪":data.fields.find(f=>f.state!=="ready")?.update?.notice||"译文准备中，暂时显示原文";

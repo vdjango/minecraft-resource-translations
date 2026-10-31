@@ -1,0 +1,20 @@
+# Add these ingress entries BEFORE the translation hostname and catch-all.
+# Supply your existing tunnel UUID and credentials-file in the complete config.
+ingress:
+  - hostname: mirror.bugg.icu
+    path: ^/_mirror_node/
+    service: http://127.0.0.1:18449
+  - hostname: mirror.bugg.icu
+    path: ^/(_internal)(/|$)
+    service: http_status:404
+  - hostname: mirror.bugg.icu
+    path: ^/(assets/[a-f0-9]{2}/[a-f0-9]{40}$|java/|mods/|mc/game/|v1/(packages/|objects/|products/java-runtime/)|maven/|fabric-meta/|fabric-maven/|neoforge-maven/|quilt-meta/|quilt-maven/|mirrors/authlib-injector/)
+    service: http://127.0.0.1:18449
+    originRequest:
+      connectTimeout: 10s
+  - hostname: mirror.bugg.icu
+    service: http://127.0.0.1:18448
+  # Keep the existing translation hostname operational.
+  - hostname: translate.bugg.icu
+    service: http://127.0.0.1:18448
+  - service: http_status:404

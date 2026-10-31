@@ -125,7 +125,7 @@ class Store:
         CREATE VIRTUAL TABLE IF NOT EXISTS catalogue_fts USING fts5(key UNINDEXED,text,tokenize='trigram');
         """)
         usage_columns = {row[1] for row in await (await self.db.execute("PRAGMA table_info(usage)")).fetchall()}
-        for name, declaration in (("model", "TEXT NOT NULL DEFAULT ''"), ("status", "TEXT NOT NULL DEFAULT 'unknown'"), ("input_tokens", "INTEGER NOT NULL DEFAULT 0"), ("cached_tokens", "INTEGER NOT NULL DEFAULT 0"), ("output_tokens", "INTEGER NOT NULL DEFAULT 0"), ("cost", "REAL"), ("currency", "TEXT NOT NULL DEFAULT 'USD'"), ("details_known", "INTEGER NOT NULL DEFAULT 0"), ("price_snapshot", "TEXT")):
+        for name, declaration in (("model", "TEXT NOT NULL DEFAULT ''"), ("status", "TEXT NOT NULL DEFAULT 'unknown'"), ("input_tokens", "INTEGER NOT NULL DEFAULT 0"), ("cached_tokens", "INTEGER NOT NULL DEFAULT 0"), ("output_tokens", "INTEGER NOT NULL DEFAULT 0"), ("cost", "REAL"), ("currency", "TEXT NOT NULL DEFAULT 'USD'"), ("details_known", "INTEGER NOT NULL DEFAULT 0"), ("price_snapshot", "TEXT"), ("cost_basis", "TEXT NOT NULL DEFAULT 'unknown'"), ("write_tokens", "INTEGER NOT NULL DEFAULT 0")):
             if name not in usage_columns:
                 await self.db.execute(f"ALTER TABLE usage ADD COLUMN {name} {declaration}")
         if not await (await self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='billing_period_migration'")).fetchone():
@@ -196,6 +196,15 @@ class Store:
                     ),
                 ),
             )
+        from .pricing import calculate
+        historical = await self.db.execute_fetchall("SELECT id,model,input_tokens,cached_tokens,output_tokens,tokens FROM usage WHERE cost IS NULL AND details_known=1 LIMIT 500")
+        await self.db.execute("BEGIN IMMEDIATE")
+        for row in historical:
+            bill = calculate(dict(prompt_tokens=row['input_tokens'], completion_tokens=row['output_tokens'], total_tokens=row['tokens'], prompt_tokens_details=dict(cached_tokens=row['cached_tokens'])), row['model'])
+            if bill['cost'] is not None:
+                snapshot = {**bill['snapshot'], 'historical_reference': True}
+                await self.db.execute("UPDATE usage SET cost=?,price_snapshot=?,cost_basis='official_backfill' WHERE id=? AND cost IS NULL", (bill['cost'], json.dumps(snapshot), row['id']))
+        await self.db.commit()
         return self
 
     async def close(self):
@@ -604,22 +613,12 @@ class Store:
                     await db.execute("UPDATE usage SET tokens=?,actual=1,status=? WHERE id=?", (usage, status, reservation))
                 return
             usage = {}
-        total = usage.get("total_tokens")
-        input_tokens = usage.get("prompt_tokens")
-        prompt_details = usage.get("prompt_tokens_details")
-        cached_tokens = prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
-        output_tokens = usage.get("completion_tokens")
-        total_valid = type(total) is int and total >= 0
-        details_valid = all(type(value) is int and value >= 0 for value in (input_tokens, cached_tokens, output_tokens))
-        price = config.model_prices.get(config.model) if config else None
-        cost = None
-        details_valid = details_valid and cached_tokens <= input_tokens and input_tokens + output_tokens == total
-        if total_valid and details_valid and price:
-            cost = ((input_tokens - cached_tokens) * price["input"] + cached_tokens * price["cached_input"] + output_tokens * price["output"]) / 1_000_000
+        from .pricing import calculate
+        bill = calculate(usage, config.model if config else '', config.model_prices if config else {})
         async with self.transaction() as db:
-            if total_valid:
-                known = int(details_valid)
-                await db.execute("UPDATE usage SET tokens=?,actual=1,input_tokens=?,cached_tokens=?,output_tokens=?,details_known=?,cost=?,price_snapshot=?,status=? WHERE id=?", (total, input_tokens if known else 0, cached_tokens if known else 0, output_tokens if known else 0, known, cost, json.dumps(price) if cost is not None else None, status, reservation))
+            if bill['total'] is not None:
+                await db.execute("UPDATE usage SET tokens=?,actual=1,input_tokens=?,cached_tokens=?,output_tokens=?,write_tokens=?,details_known=?,cost=?,price_snapshot=?,cost_basis=?,status=? WHERE id=?",
+                    (bill['total'], bill['input'], bill['cached'], bill['output'], bill['written'], int(bill['details_known']), bill['cost'], json.dumps(bill['snapshot']) if bill['snapshot'] else None, bill['basis'], status, reservation))
             else:
                 await db.execute("UPDATE usage SET status=? WHERE id=?", ("unknown" if status == "succeeded" else status, reservation))
 

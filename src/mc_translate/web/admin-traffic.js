@@ -40,8 +40,10 @@ function renderTraffic(data) {
 }
 let trafficRequest=0;
 async function loadTraffic() {
-  const version=++trafficRequest,button=$("refresh-traffic");if(button)button.disabled=true;
+  const version=++trafficRequest,host=$("traffic-dashboard")?"traffic-metrics":"traffic-summary";
+  loading(host,"refresh-traffic",true);if($("traffic-health"))$("traffic-health").textContent="正在更新统计，已有数据保留…";
   try {const data=await api("v1/admin/traffic?days="+($("traffic-days")?.value||"1"));if(version!==trafficRequest)return;if($("traffic-summary"))renderTrafficSummary(data);if($("traffic-dashboard"))renderTraffic(data);}
-  finally{if(button&&version===trafficRequest)button.disabled=false;}
+  catch(error){if(version===trafficRequest){if($("traffic-health"))$("traffic-health").textContent=error.message;const target=$(host);if(target.querySelector("[data-loading]"))target.querySelector("[data-loading]").textContent=error.message;}throw error;}
+  finally{if(version===trafficRequest)loading(host,"refresh-traffic",false);}
 }
 window.addEventListener("DOMContentLoaded",()=>{if($("refresh-traffic"))$("refresh-traffic").onclick=()=>loadTraffic().catch(showError);if($("traffic-days"))$("traffic-days").onchange=()=>loadTraffic().catch(showError);});

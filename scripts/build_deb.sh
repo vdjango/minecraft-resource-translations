@@ -38,10 +38,9 @@ chown -R buggtranslate:buggtranslate "$DATA"
 if [ ! -x "$VENV/bin/python" ]; then python3 -m venv "$VENV"; fi
 "$VENV/bin/python" -m pip install --no-cache-dir --upgrade "$APP"
 if [ ! -f /etc/buggcraft-translation.env ]; then
-  ADMIN_TOKEN=$(python3 -c 'import secrets; print("bct_admin_" + secrets.token_urlsafe(32))')
   sed -e 's|TRANSLATION_HOST=.*|TRANSLATION_HOST=127.0.0.1|' \
       -e 's|TRANSLATION_DATABASE=.*|TRANSLATION_DATABASE=/var/lib/buggcraft-translation/translations.sqlite3|' \
-      -e 's|TRANSLATION_ADMIN_TOKEN=.*|TRANSLATION_ADMIN_TOKEN='"$ADMIN_TOKEN"'|' \
+      -e 's|TRANSLATION_ADMIN_TOKEN=.*|TRANSLATION_ADMIN_TOKEN=|' \
       "$APP/.env.example" > /etc/buggcraft-translation.env
   chmod 600 /etc/buggcraft-translation.env
 fi
@@ -49,6 +48,7 @@ sed 's|/opt/buggcraft-translation/current|/opt/buggcraft-translation/app|g' \
     "$APP/deploy/buggcraft-translation.service" > /etc/systemd/system/buggcraft-translation.service
 systemctl daemon-reload
 systemctl enable --now buggcraft-translation.service
+printf '\nOpen the website: a new installation automatically enters /setup to configure the administrator and platform.\n'
 EOF
 chmod 755 "$STAGE/DEBIAN/postinst"
 

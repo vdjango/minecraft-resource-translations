@@ -18,6 +18,7 @@ windows = ["pywin32>=306; platform_system == 'Windows'"]
 
 [project.scripts]
 mc-translate = "mc_translate.__main__:main"
+mc-mirror = "mc_translate.mirror:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,12 +1,78 @@
 import json
+import asyncio
+import time
+from unittest.mock import patch
 from pathlib import Path
 
 from mc_translate.config import Config
-from mc_translate.management import Settings
+from mc_translate.management import Settings, key_hash
 from tests.test_platform import PlatformFixture
 
 
 class ManagementCase(PlatformFixture):
+    async def test_model_directory_cold_reads_share_one_provider_request(self):
+        self.config.admin_token = "admin-test"
+        headers = {"Authorization": "Bearer admin-test"}
+        api = self.app["api"]
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        async def slow_provider(identity, candidate):
+            calls.append(identity)
+            entered.set()
+            await release.wait()
+            return ["model-one"]
+        with patch.object(api, "refresh_model_list", side_effect=slow_provider):
+            first = asyncio.create_task(self.client.get("/v1/admin/models", headers=headers))
+            await asyncio.wait_for(entered.wait(), 1)
+            second = asyncio.create_task(self.client.get("/v1/admin/models", headers=headers))
+            await asyncio.sleep(0.03)
+            self.assertEqual(len(calls), 1)
+            release.set()
+            for response in await asyncio.gather(first, second):
+                self.assertEqual(response.status, 200)
+                self.assertEqual((await response.json())["models"], ["model-one"])
+
+    async def test_expired_model_directory_returns_without_waiting_for_provider(self):
+        self.config.admin_token = "admin-test"
+        api = self.app["api"]
+        identity = key_hash(self.config.base_url + "\n" + self.config.api_key)
+        api.model_lists[identity] = (time.monotonic() - 1, ["cached-model"])
+        release = asyncio.Event()
+        async def slow_provider(*args):
+            await release.wait()
+            return ["new-model"]
+        with patch.object(api, "refresh_model_list", side_effect=slow_provider):
+            response = await asyncio.wait_for(self.client.get("/v1/admin/models", headers={"Authorization": "Bearer admin-test"}), 1)
+            self.assertEqual(await response.json(), dict(models=["cached-model"], stale=True))
+            release.set()
+            await asyncio.gather(*list(api.model_refreshes.values()))
+
+    async def test_owner_chooses_credentials_once_in_browser(self):
+        account=self.app['api'].admin_accounts
+        self.assertFalse(account.initialized)
+        first_page=await (await self.client.get('/admin')).text()
+        self.assertIn('data-mode="setup"',first_page)
+        self.assertIn('<h2>设置管理员账户</h2>',first_page)
+        token=account.link_path.read_text().strip().split('#',1)[1]
+        body=dict(username='owner',password='chosen-password-2026',password_confirm='chosen-password-2026')
+        response=await self.client.post('/v1/admin/setup',json=body,headers={'X-Admin-Setup':'wrong'})
+        self.assertEqual(response.status,403)
+        response=await self.client.post('/v1/admin/setup',json=body,headers={'X-Admin-Setup':token})
+        self.assertEqual(response.status,200)
+        self.assertTrue(response.cookies['translation_admin']['httponly'])
+        self.assertEqual(response.cookies['translation_admin']['path'],'/')
+        self.assertEqual((await self.client.get('/v1/admin/settings')).status,200)
+        html=await (await self.client.get('/admin/tasks')).text()
+        self.assertIn('data-mode="session"',html)
+        self.assertNotIn('id="panel" class="hidden"',html)
+        self.assertFalse(account.link_path.exists())
+        self.assertNotIn(body['password'],account.path.read_text())
+        self.assertEqual((await self.client.post('/v1/admin/setup',json=body,headers={'X-Admin-Setup':token})).status,403)
+        await self.client.delete('/v1/admin/session')
+        self.assertEqual((await self.client.get('/v1/admin/settings')).status,401)
+        self.assertEqual((await self.client.post('/v1/admin/session',json=dict(username='owner',password='wrong'))).status,401)
+        self.assertEqual((await self.client.post('/v1/admin/session',json=dict(username='owner',password=body['password']))).status,200)
+
     async def test_settings_auth_redaction_atomic_persistence(self):
         self.assertEqual((await self.client.get("/v1/admin/settings")).status, 401)
         self.config.admin_token = "admin-test"

@@ -4,7 +4,7 @@ const labels = {mod:"模组",resourcepack:"资源包",shader:"光影",modpack:"�
 const states = {missing:"等待翻译",queued:"已加入翻译队列",verifying:"正在核验原文",running:"正在翻译",partial:"正在分段翻译",deferred:"稍后重试",failed:"翻译暂不可用",source_mismatch:"原文已更新"};
 const tagLabels = {optimization:"性能优化",adventure:"冒险",decoration:"装饰",equipment:"装备",food:"食物",library:"前置库",magic:"魔法",mobs:"生物",storage:"存储",technology:"科技",utility:"实用工具",worldgen:"世界生成",realistic:"写实",fantasy:"奇幻","vanilla-like":"原版风格",animated:"动画",themed:"主题",challenging:"挑战",combat:"战斗","kitchen-sink":"综合玩法",quests:"任务",multiplayer:"多人",lightweight:"轻量",performance:"性能","API and Library":"API 与前置库"};
 const relations = {required:"必需",optional:"可选",incompatible:"不兼容",embedded:"已内置",tool:"工具"};
-const md = window.markdownit({html:true,linkify:false});
+let md;
 let targetLanguage="zh-Hans",languageNames={"zh-Hans":"简体中文"};
 const languageName=()=>languageNames[targetLanguage]||targetLanguage;
 const originalLabel=t=>({project_name:"项目名称，保留原名",empty_content:"暂无正文内容",technical_content:"代码或版本信息，保留原文",already_target_language:"内容已是目标语言",unchanged:"内容无需改动"}[t.no_translation_reason]||"无需翻译，保留原文");
@@ -28,7 +28,7 @@ function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefi
 function date(value){const d=new Date(value);return value&&!Number.isNaN(d.getTime())?d.toLocaleDateString("zh-CN"):"暂未提供";}
 function number(v){return new Intl.NumberFormat("zh-CN",{notation:"compact",maximumFractionDigits:1}).format(Number(v)||0);}
 function link(url,text,cls){const e=node("a",text,cls);try{const u=new URL(url);if(u.protocol==="https:"){e.href=u.href;e.target="_blank";e.rel="noopener noreferrer";}}catch(_){}return e;}
-function icon(target,url,title){target.replaceChildren(node("span",(title||"B").slice(0,1)));try{if(new URL(url).protocol!=="https:")return;}catch(_){return;}const img=document.createElement("img");img.alt="";img.loading="lazy";img.referrerPolicy="no-referrer";img.onload=()=>target.replaceChildren(img);img.src=url;}
+function icon(target,url,title){target.replaceChildren(node("span",(title||"B").slice(0,1)));try{if(new URL(url).protocol!=="https:")return;}catch(_){return;}const img=document.createElement("img");img.alt="";img.loading="lazy";img.decoding="async";img.referrerPolicy="no-referrer";img.onload=()=>target.replaceChildren(img);img.src=url;}
 function chips(values,cls="tag"){const box=node("div",undefined,"tag-list");for(const v of values||[])box.append(node("span",tagLabels[v]||v,cls));return box;}
 function versions(values){const v=[...(values||[])].sort(new Intl.Collator("en",{numeric:true}).compare).reverse();return v.length?v.slice(0,3).join(" / ")+(v.length>3?` 等 ${v.length} 个版本`:""):"版本信息待补全";}
 function authors(m){return(m.authors||[]).map(a=>a.name).join("、")||"作者信息待补全";}
@@ -36,7 +36,7 @@ function renderBody(target,text,format="markdown") {
   const html=format==="html"?text:md.render(text);
   // Both original and translated content go through the same sanitizer.
   target.innerHTML=DOMPurify.sanitize(html,{FORBID_TAGS:["style","script","iframe","object","embed","svg","math","form","input","button","video","audio"],FORBID_ATTR:["style","srcset"]});
-  for(const img of target.querySelectorAll("img")){img.loading="lazy";img.referrerPolicy="no-referrer";}
+  for(const img of target.querySelectorAll("img")){img.loading="lazy";img.decoding="async";img.referrerPolicy="no-referrer";}
   for(const a of target.querySelectorAll("a")){a.target="_blank";a.rel="noopener noreferrer";}
 }
 pageViews.catalog.mount(resource=>showDetail(resource));
@@ -86,7 +86,9 @@ async function showDetail(resource){
   const token=++generation;detail=resource;detailSource=null;lastTranslation=null;tab("intro");$("report").classList.add("hidden");$("detail-title").textContent="正在读取项目…";$("detail-status").textContent="正在读取译文…";$("body-language-label").textContent="正在读取译文";$("translated-body").replaceChildren(node("p","正在读取项目介绍…","muted"));delete $("translated-body").dataset.revision;
   for(const id of["translated-summary","original-body","original-summary","project-sidebar","detail-tags","detail-byline"])$(id).replaceChildren();$("original-article").classList.add("hidden");$("toggle-original").textContent="对照原文";$("toggle-original").setAttribute("aria-pressed","false");if(!$("detail-dialog").open)$("detail-dialog").showModal();
   try{
-    let initial;const detailPath=`projects/${resource.provider}/${resource.project_id}/detail?target_language=${encodeURIComponent(targetLanguage)}`;try{initial=await request(detailPath);}catch(e){if(e.message!=="project_not_indexed")throw e;await refresh(resource,$("detail-status"));initial=await request(detailPath);}if(token!==generation)return;const source=initial.source;detailSource=source;
+    const detailPath=`projects/${resource.provider}/${resource.project_id}/detail?target_language=${encodeURIComponent(targetLanguage)}`;
+    const [initial,renderer]=await Promise.all([(async()=>{try{return await request(detailPath);}catch(e){if(e.message!=="project_not_indexed")throw e;await refresh(resource,$("detail-status"));return request(detailPath);}})(),prepareContentRenderer()]);
+    if(token!==generation)return;md=renderer;const source=initial.source;detailSource=source;
     $("detail-title").textContent=source.fields.title.text;$("detail-provider").textContent=(resource.provider==="modrinth"?"Modrinth":"CurseForge")+" / "+labels[source.kind];$("original-link").href=source.source_url;$("translated-summary").textContent=source.fields.summary.text;$("original-summary").textContent=source.fields.summary.text;renderBody($("original-body"),source.fields.body.text,source.fields.body.format);renderMetadata(source);$("versions").textContent="当前原文版本："+source.snapshot_hash;
     renderBody($("translated-body"),source.fields.body.text,source.fields.body.format);
     request(`projects/${resource.provider}/${resource.project_id}/history`).then(h=>{if(token===generation)$("versions").textContent+="\n\n"+h.events.map(x=>date(x.observed_at)+"  "+({source_observed:"原文更新",metadata_updated:"项目信息更新",translation_published:"译文发布"}[x.type]||x.type)+(x.changed_fields?"  "+x.changed_fields.join(", "):"")).join("\n");}).catch(()=>{});
@@ -120,7 +122,7 @@ async function initialize(){
   let saved;try{saved=localStorage.getItem("buggcraft.translation.target-language");}catch(_){}
   if(saved&&[...$("target-language").options].some(o=>o.value===saved)){targetLanguage=saved;$("target-language").value=saved;}
   const initialLanguage=targetLanguage;
-  const seeded=pageViews.catalog.seeded();if(seeded&&targetLanguage==="zh-Hans"){$("count").textContent=`共 ${seeded.total_count} 个项目`;cursor=seeded.next_cursor;$("more").disabled=!cursor;translateVisible(seeded.projects,listGeneration);}else void load();
+  const seeded=pageViews.catalog.seeded();if(seeded&&targetLanguage==="zh-Hans"){$("count").textContent=`共 ${seeded.total_count} 个项目`;cursor=seeded.next_cursor;$("more").disabled=!cursor;$("projects").setAttribute("aria-busy","false");translateVisible(seeded.projects,listGeneration);}else void load();
   try{
     const d=await request("capabilities");
     $("service-state").textContent=d.generation_available?"翻译服务在线":"译文查询在线 · 生成暂不可用";

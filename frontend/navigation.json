@@ -1,0 +1,7 @@
+[
+  {"href":"/mirror", "label":"镜像源"},
+  {"href":"/", "label":"译文库"},
+  {"href":"/docs", "label":"开发文档"},
+  {"href":"/developers", "label":"开发者中心"},
+  {"href":"/admin", "label":"管理后台"}
+]

@@ -1,5 +1,8 @@
 "use strict";
 async function loadNodes() {
+  loading("federation-nodes","refresh-nodes",true);
+  $("node-role").textContent="正在更新节点状态…";
+  try {
   const data=await api("v1/admin/nodes"),host=$("federation-nodes");host.replaceChildren();
   $("node-role").textContent=data.role==="mirror"?"当前是社区镜像 · 主服务 "+data.hub_url+" · "+({pending:"等待审批",active:"已启用",unavailable:"暂时无法连接"}[data.local_state]||"等待连接"):"当前是主服务 · 审批通过且在线的节点才会进入自动分发。";
   const online=data.nodes.filter(item=>item.online).length;
@@ -12,5 +15,7 @@ async function loadNodes() {
     const review=node("button",item.state==="active"?"撤销节点":"验证并启用");review.className="secondary";review.onclick=async()=>{review.disabled=true;try{await api("v1/admin/nodes",{id:item.id,state:item.state==="active"?"revoked":"active"});await loadNodes();message(item.state==="active"?"节点已退出分发列表。":"节点已启用，等待下一次心跳后开始分流。");}catch(error){message(error.code==="node_verification_failed"?"节点验证失败，请确认域名和 HTTPS 可访问，且已连接当前主服务。":error.message,true);}finally{review.disabled=false;}};actions.append(review);row.append(text,status,actions);host.append(row);
   }
   if(!data.nodes.length){const empty=node("p",data.role==="mirror"?"此页面只管理本地节点；其他节点由主服务审批。":"暂无社区节点申请，部署者按加入指南启动后会自动出现在这里。");empty.className="record-empty";host.append(empty);}
+  }catch(error){$("node-role").textContent=error.message;throw error;}
+  finally{loading("federation-nodes","refresh-nodes",false);}
 }
 window.addEventListener("DOMContentLoaded",()=>{if($("refresh-nodes"))$("refresh-nodes").onclick=()=>loadNodes().catch(showError);});

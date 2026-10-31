@@ -99,9 +99,9 @@ function usageRow(call) {
     ["Token 总量", number(call.tokens) + (call.actual ? " · 上游已回报" : " · 暂按预留量统计")],
     ["输入 Token", call.details_known ? number(call.input_tokens) : "上游未回报完整明细"],
     ["其中缓存输入", call.details_known ? number(call.cached_tokens) : "未知"], ["输出 Token", call.details_known ? number(call.output_tokens) : "未知"],
-    ["估算费用", money(call.cost)], ["费用说明", call.cost == null ? "缺少调用用量明细或模型价格，无法估算。" : "按调用时保存的模型价格估算，最终以服务商账单为准。"]
+    ["估算费用", money(call.cost)], ["费用说明", call.cost == null ? "缺少调用用量明细或模型价格，无法估算。" : call.cost_basis === "official_backfill" ? "历史用量按当前官方单价补算，仅供参考。" : call.cost_basis?.startsWith("official") ? "按调用时 OpenAI 标准单价估算，供应商扣款以实际账单为准。" : "按调用时自定义单价估算，以供应商账单为准。"], ["缓存写入 Token", number(call.write_tokens||0)], ["明细完整度", call.cost_basis?.endsWith("_estimate") ? "供应商未回报完整缓存明细，按参考口径估算" : "已记录回报明细"]
   ]));
-  row.append(recordCell("模型", call.model || "历史模型未记录", "模型调用 #" + call.id, "record-main"), recordCell("状态", statusBadge(call.status, call.status === "pending" ? "调用中" : undefined)), recordCell("Token 总量", number(call.tokens), call.actual ? "已回报用量" : "预留 / 未确认", "record-numeric"), recordCell("费用 · USD", money(call.cost), "", "record-numeric"), recordCell("调用时间", day, clock, "record-time"), recordCell("操作", details, "", "record-actions"));
+  row.append(recordCell("模型", call.model || "历史模型未记录", "模型调用 #" + call.id, "record-main"), recordCell("状态", statusBadge(call.status, call.status === "pending" ? "调用中" : undefined)), recordCell("Token 总量", number(call.tokens), call.actual ? "已回报用量" : "预留 / 未确认", "record-numeric"), recordCell("费用 · USD", money(call.cost), call.cost == null ? "待补充明细或单价" : "参考估算", "record-numeric"), recordCell("调用时间", day, clock, "record-time"), recordCell("操作", details, "", "record-actions"));
   return row;
 }
 function clientRow(client) {

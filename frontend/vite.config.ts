@@ -11,6 +11,12 @@ export default defineConfig({
   plugins: [vue(), {
     name: 'existing-page-controllers',
     writeBundle(_options,bundle) {
+      const themePath=resolve(web,'theme.js');
+      if(existsSync(themePath)){
+        const theme=readFileSync(themePath,'utf8').split('/* BUGGCRAFT PAGE SHELL */')[0].trimEnd();
+        writeFileSync(themePath,theme+'\n/* BUGGCRAFT PAGE SHELL */\n'+readFileSync(resolve(import.meta.dirname,'page-shell.js'),'utf8'));
+      }
+
       for(const name of Object.keys(pages)) {
         const entry=bundle['vue-page-'+name+'.js'];
         if(!entry || entry.type!=='chunk')continue;
@@ -20,7 +26,14 @@ export default defineConfig({
         const needle='vue-page-'+name+'.js';
         const start=previous.indexOf(needle);
         const end=previous.indexOf('"',start);
-        const updated=start<0||end<0?previous:previous.slice(0,start+needle.length)+'?v='+revision+previous.slice(end);
+        let updated=start<0||end<0?previous:previous.slice(0,start+needle.length)+'?v='+revision+previous.slice(end);
+        const dependencies=new Set<string>();
+        const visit=(chunk:typeof entry)=>{for(const dependency of chunk.imports){if(dependencies.has(dependency))continue;dependencies.add(dependency);const item=bundle[dependency];if(item?.type==='chunk')visit(item);}};
+        visit(entry);
+        updated=updated.replace(/<link rel="modulepreload"[^>]*>\s*/g,'');
+        if(name==='index')updated=updated.replace(/<script src="\/?assets\/(?:markdown-it|purify)\.min\.js(?:\?[^"<>]*)?" defer><\/script>/g,'');
+        updated=updated.replace('</head>',[...dependencies].map(file=>`<link rel="modulepreload" href="/assets/${file}">`).join('')+'</head>');
+        updated=updated.replace(/(src|href)="\/assets\/([^"?]+\.(?:js|css))(?:\?v=[^"]*)?"/g,(match,attribute,file)=>{const path=resolve(web,file);return !file.startsWith('vue-runtime-')&&existsSync(path)?`${attribute}="/assets/${file}?v=${createHash('sha256').update(readFileSync(path)).digest('hex').slice(0,12)}"`:match;});
         if(previous!==updated)writeFileSync(html,updated);
       }
     },
@@ -38,12 +51,15 @@ export default defineConfig({
       source = source.replace(/(window|document)\.addEventListener\(/g, 'scope.listen($1,');
       const exports = ['accountView', 'loadSessions', 'refresh'].map(key => `if(typeof ${key}==='function') scope.expose('${key}',${key});`).join('\n');
       return `import {mountPage} from '${resolve(import.meta.dirname,'src/runtime.ts').replaceAll('\\','/')}';
-        mountPage(function(scope, pageViews) {
+        ${name==='index'?`import {prepareContentRenderer} from '${resolve(import.meta.dirname,'src/contentRenderer.ts').replaceAll('\\','/')}';`:''}
+        import Page from '@pages/${name}.vue';
+        export function mount(){ mountPage(function(scope, pageViews) {
           const {fetch,setTimeout,clearTimeout,setInterval,clearInterval}=scope;
           ${source}\n${exports}\n
-        });`;
+        }, Page); } if(!window.__buggcraftRouteLoading)mount();`;
     },
   }],
+  resolve:{alias:{'@pages':resolve(import.meta.dirname,'src/pages')}},
   build: {
     target: 'es2022', outDir: web, emptyOutDir: false, sourcemap: false,
     rollupOptions: {

@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 RUNTIME_FIELDS = {
+    "public_url",
     "base_url",
     "api_key",
     "model",
@@ -41,6 +42,7 @@ class Settings:
             self.apply(json.loads(self.path.read_text(encoding="utf-8")), persist=False)
 
     def public(self):
+        from .pricing import OFFICIAL_PRICES, PRICE_DATE, PRICE_SOURCE
         return {
             **{
                 name: getattr(self.config, name)
@@ -49,6 +51,8 @@ class Settings:
             "api_key_configured": bool(self.config.api_key),
             "smtp_password_configured": bool(self.config.smtp_password),
             "model_prices": self.config.model_prices,
+            "official_model_prices": OFFICIAL_PRICES,
+            "pricing_date": PRICE_DATE, "pricing_source": PRICE_SOURCE,
         }
 
     def apply(self, changes, persist=True):
@@ -59,6 +63,11 @@ class Settings:
         ):
             raise ValueError("invalid settings")
         proposed = replace(self.config, **changes)
+        public = urlsplit(proposed.public_url) if isinstance(proposed.public_url, str) else None
+        if (not public or public.scheme not in ('http', 'https') or not public.hostname
+                or public.username or public.password or public.query or public.fragment
+                or public.path not in ('', '/') or len(proposed.public_url) > 2048):
+            raise ValueError('invalid public URL')
         if type(proposed.mail_enabled) is not bool:
             raise ValueError("invalid mail switch")
         for name in (

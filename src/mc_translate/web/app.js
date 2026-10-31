@@ -28,7 +28,7 @@ function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefi
 function date(value){const d=new Date(value);return value&&!Number.isNaN(d.getTime())?d.toLocaleDateString("zh-CN"):"暂未提供";}
 function number(v){return new Intl.NumberFormat("zh-CN",{notation:"compact",maximumFractionDigits:1}).format(Number(v)||0);}
 function link(url,text,cls){const e=node("a",text,cls);try{const u=new URL(url);if(u.protocol==="https:"){e.href=u.href;e.target="_blank";e.rel="noopener noreferrer";}}catch(_){}return e;}
-function icon(target,url,title){target.replaceChildren(node("span",(title||"B").slice(0,1)));try{if(new URL(url).protocol!=="https:")return;}catch(_){return;}const img=document.createElement("img");img.alt="";img.loading="lazy";img.referrerPolicy="no-referrer";img.onload=()=>target.replaceChildren(img);img.src=url;}
+function icon(target,url,title){target.replaceChildren(node("span",(title||"B").slice(0,1)));try{if(new URL(url).protocol!=="https:")return;}catch(_){return;}const img=document.createElement("img");img.alt="";img.loading="lazy";img.decoding="async";img.referrerPolicy="no-referrer";img.onload=()=>target.replaceChildren(img);img.src=url;}
 function chips(values,cls="tag"){const box=node("div",undefined,"tag-list");for(const v of values||[])box.append(node("span",tagLabels[v]||v,cls));return box;}
 function versions(values){const v=[...(values||[])].sort(new Intl.Collator("en",{numeric:true}).compare).reverse();return v.length?v.slice(0,3).join(" / ")+(v.length>3?` 等 ${v.length} 个版本`:""):"版本信息待补全";}
 function authors(m){return(m.authors||[]).map(a=>a.name).join("、")||"作者信息待补全";}
@@ -36,7 +36,7 @@ function renderBody(target,text,format="markdown") {
   const html=format==="html"?text:md.render(text);
   // Both original and translated content go through the same sanitizer.
   target.innerHTML=DOMPurify.sanitize(html,{FORBID_TAGS:["style","script","iframe","object","embed","svg","math","form","input","button","video","audio"],FORBID_ATTR:["style","srcset"]});
-  for(const img of target.querySelectorAll("img")){img.loading="lazy";img.referrerPolicy="no-referrer";}
+  for(const img of target.querySelectorAll("img")){img.loading="lazy";img.decoding="async";img.referrerPolicy="no-referrer";}
   for(const a of target.querySelectorAll("a")){a.target="_blank";a.rel="noopener noreferrer";}
 }
 function card(p){

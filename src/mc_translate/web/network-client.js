@@ -1,14 +1,24 @@
 "use strict";
 // Only anonymous public reads go to mirrors. Credentials and writes stay at hub.
 class TranslationNetwork {
-  constructor() { this.hub=location.origin;this.selected=location.origin;this.selectedId="hub";this.candidates=[];this.failedUntil=new Map();this.refreshing=false;this.ready=this.initialize(); }
+  constructor() {
+    this.hub=location.origin;this.selected=location.origin;this.selectedId="hub";this.candidates=[];this.failedUntil=new Map();this.refreshing=false;
+    const bootstrap=document.querySelector('meta[name="translation-hub"]')?.content;
+    try{const url=new URL(bootstrap);if(url.origin===bootstrap&&!url.username&&!url.password&&(url.protocol==="https:"||location.hostname==="127.0.0.1"&&url.hostname==="127.0.0.1")){this.hub=url.origin;this.bootstrapped=true;}}catch(error){/* Older static deployments use bounded discovery. */}
+    this.ready=this.initialize();
+  }
   static read(path,options) { const method=(options.method||"GET").toUpperCase();return method==="POST"&&path==="translations:resolve"||method==="GET"&&(path.startsWith("artifacts/")||path.startsWith("catalog/")||/^projects\/[^/]+\/[^/]+\/(manifest|source|history|detail)(\?|$)/.test(path)||path==="capabilities"); }
   async initialize() {
-    try {const response=await fetch("/v1/federation/health",{signal:AbortSignal.timeout(1800)});if(response.ok){const data=await response.json();if(data.role==="mirror"){this.hub=data.hub_url;this.selected=this.hub;}}}catch(error){/* Existing independent deployments remain usable. */}
+    if(!this.bootstrapped)try {const response=await fetch("/v1/federation/health",{signal:AbortSignal.timeout(1800)});if(response.ok){const data=await response.json();if(data.role==="mirror"){this.hub=data.hub_url;this.selected=this.hub;}}}catch(error){/* Existing independent deployments remain usable. */}
     void this.select();
   }
-  async select() {
-    if(this.refreshing)return;this.refreshing=true;
+  select() {
+    if(this.selection)return this.selection;
+    this.refreshing=true;
+    this.selection=this.discover().finally(()=>{this.refreshing=false;this.selection=null;});
+    return this.selection;
+  }
+  async discover() {
     try {
       const response=await fetch(this.hub+"/v1/federation/nodes",{credentials:"omit",signal:AbortSignal.timeout(2000)});
       if(!response.ok)return;const directory=await response.json();
@@ -20,12 +30,13 @@ class TranslationNetwork {
       if(available.length){const fastest=available[0];const nearbyMirror=available.find(node=>node.role==="mirror"&&node.rtt<=fastest.rtt+5);const chosen=nearbyMirror||fastest;this.selected=chosen.base_url;this.selectedId=chosen.id;}
       window.dispatchEvent(new CustomEvent("translation-node-changed",{detail:{id:this.selectedId,url:this.selected,candidates:this.candidates}}));
     }catch(error){/* Discovery is optional; current hub remains the fallback. */}
-    finally{this.refreshing=false;}
   }
   async fetch(path,options={}) {
     const timed=ms=>({...options,signal:options.signal?AbortSignal.any([options.signal,AbortSignal.timeout(ms)]):AbortSignal.timeout(ms)});
     // Start local cached reads immediately; federation discovery runs in parallel.
-    if(!TranslationNetwork.read(path,options)){await this.ready;return fetch(this.hub+"/v1/"+path,timed(15000));}
+    // Server-rendered hub identity avoids a discovery round trip while preserving
+    // correct routing on mirrors. Older static pages keep their bounded bootstrap.
+    if(!TranslationNetwork.read(path,options)){if(!this.bootstrapped)await this.ready;return fetch(this.hub+"/v1/"+path,timed(15000));}
     const preferred=this.selected;
     if(preferred!==this.hub&&(this.failedUntil.get(preferred)||0)<Date.now()){
       try{const headers=new Headers(options.headers||{});headers.delete("Authorization");headers.delete("Cookie");headers.delete("Idempotency-Key");const response=await fetch(preferred+"/v1/"+path,{...timed(2500),headers,credentials:"omit"});if(response.ok||response.status===304)return response;throw Error("node unavailable");}

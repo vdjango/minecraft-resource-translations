@@ -1,0 +1,24 @@
+{
+  "public_url": "https://your-node.example.com",
+  "quota_gib": 50,
+  "reserve_gib": 10,
+  "concurrency": 4,
+  "eviction": "oldest_version",
+  "protect_latest": 2,
+  "auto_refresh": true,
+  "refresh_minutes": 30,
+  "monthly_egress_gib": 0,
+  "egress_threshold": 90,
+  "bandwidth_mbps": 0,
+  "max_serving": 32,
+  "policies": {
+    "core": "cache",
+    "loaders": "cache",
+    "mods": "disabled",
+    "java": "cache",
+    "libraries": "cache",
+    "assets": "cache"
+  },
+  "nodes": [],
+  "sources": []
+}

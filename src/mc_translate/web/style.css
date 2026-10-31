@@ -1,3 +1,5 @@
+.site-mobile-menu{display:none}.site-nav-tools{display:flex;align-items:center;gap:10px}.site-nav .site-desktop-links{gap:2px}.site-nav .brand-type small{font-size:7px;letter-spacing:1.1px}.site-nav{box-shadow:0 6px 28px #0000000a}.site-nav a[aria-current="page"]{color:var(--text)}
+@media(max-width:950px){nav.site-nav{flex-wrap:nowrap;min-height:72px;padding-block:10px;gap:12px}.site-nav .site-desktop-links{display:none}.site-mobile-menu{display:block;position:relative}.site-mobile-menu summary{cursor:pointer;list-style:none;font-size:12px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel)}.site-mobile-menu summary::-webkit-details-marker{display:none}.site-mobile-menu summary span{margin-left:8px}.site-mobile-menu>div{position:absolute;right:0;top:calc(100% + 14px);width:190px;display:grid;padding:9px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 16px 45px #0005}.site-mobile-menu a{padding:10px 14px;font-size:13px;border-radius:7px}.site-mobile-menu a[aria-current="page"]{background:var(--raised);color:var(--accent-soft)}.site-nav .site-nav-tools{flex-basis:auto;gap:8px}.site-nav .theme-toggle{font-size:10px}.site-nav .brand-type strong{font-size:11px}.site-nav .brand-type small{max-width:130px;overflow:hidden;font-size:6px}}
 :root {
   --content-width:1280px; --page-gutter:clamp(20px,4vw,64px);
   color-scheme: dark; --bg:#100d19; --panel:#171322; --raised:#1d1830; --text:#f7f3ff;
@@ -103,6 +105,7 @@ label { display:flex; flex-direction:column; gap:8px; margin:20px 0; font-size:1
 .comparison article>p { font-size:13px; }
 .prose { font-size:13px; line-height:1.9; white-space:pre-wrap; overflow-wrap:anywhere; }
 details { margin-top:30px; padding-top:20px; border-top:1px solid color-mix(in srgb,var(--line) 55%,transparent); color:var(--muted); font-size:12px; }
+.site-mobile-menu{margin:0;padding:0;border:0}
 summary { cursor:pointer; }
 pre { font-family:Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
 .docs { max-width:900px; padding-bottom:40px; }

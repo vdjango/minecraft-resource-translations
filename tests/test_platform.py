@@ -79,6 +79,9 @@ class FakeModel:
 class PlatformFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        # API fixtures represent a configured installation. Fresh-install
+        # routing and persistence are exercised in test_installation.py.
+        (Path(self.temp.name)/'installation.json').write_text(json.dumps(dict(complete=True, sections=[])))
         self.config = Config(
             database=str(Path(self.temp.name) / "test.sqlite"),
             api_key="fake",

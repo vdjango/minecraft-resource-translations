@@ -4,7 +4,7 @@
 
 <h1 align="center">Buggcraft Minecraft Resource Translations</h1>
 
-<p align="center">面向 Minecraft 启动器与资源目录的版本化、多语言翻译服务。</p>
+<p align="center">面向 Minecraft 玩家与启动器的资源、共享译文与游戏下载服务。</p>
 
 <p align="center">
   <a href="https://github.com/vdjango/minecraft-resource-translations/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/vdjango/minecraft-resource-translations/ci.yml?label=CI" alt="CI"></a>
@@ -17,7 +17,9 @@
 
 一个面向 Minecraft 启动器和资源网站的共享翻译平台。它把 Modrinth、CurseForge 的模组、资源包、光影和整合包介绍按项目 ID、原文哈希、目标语言缓存起来：命中时快速返回译文，未命中时先显示原文并在后台翻译。
 
-[在线译文库](https://translate.bugg.icu/) · [在线开放文档](https://translate.bugg.icu/docs) · [社区节点页面](https://translate.bugg.icu/network) · [GitHub](https://github.com/vdjango/minecraft-resource-translations)
+[资源服务](https://translate.bugg.icu/) · [开发文档](https://translate.bugg.icu/docs) · [开发者中心](https://translate.bugg.icu/developers) · [GitHub](https://github.com/vdjango/minecraft-resource-translations)
+
+游戏下载与项目译文共用首页、开发文档、开发者中心和管理工作台。`/admin/settings` 按翻译、下载、存储、分流、来源和域名缓存分页签设置。下载能力的部署见 [资源节点部署](docs/资源节点部署.md)，策略与容量规划见 [实施清单](docs/镜像服务实施清单.md)。计划统一域名为 `mirror.bugg.icu`，公网切换需按实际部署完成。
 
 本项目按 AGPL-3.0-or-later 发布，欢迎提交 Issue、改进接口和加入社区节点。源代码、API 合约和示例都在同一个仓库中；模型服务只在生成译文时使用，读取已有译文不需要模型 Key。
 
@@ -68,7 +70,7 @@ TRANSLATION_DATABASE=data/translations.sqlite3
 TRANSLATION_BASE_URL=https://你的模型服务/v1
 TRANSLATION_API_KEY=你的模型服务Key
 TRANSLATION_MODEL=gpt-6.1-sol
-TRANSLATION_ADMIN_TOKEN=随机生成的后台令牌
+TRANSLATION_ADMIN_TOKEN=
 ```
 
 打开：
@@ -78,11 +80,13 @@ TRANSLATION_ADMIN_TOKEN=随机生成的后台令牌
 - 后台：<http://127.0.0.1:18448/admin>
 - 健康检查：<http://127.0.0.1:18448/health>
 
+首次安装后，访问任意网页都会进入 `/setup` 初始化向导，依次设置管理员用户名和密码、网站入口、翻译供应商与预算、六类下载策略与缓存空间、邮件通知，确认完成后开放正常页面。配置逐步保存，可刷新或重启后登录继续。无需默认密码或初始化链接；密码只保存为 scrypt 摘要。已有管理账户或 `TRANSLATION_ADMIN_TOKEN` 的安装继续使用原配置。已有账户的密码恢复仍使用服务器生成的私有恢复链接。
+
 没有配置模型 Key 也可以读取已有译文，但无法生成新的模型译文。生产环境请使用 HTTPS 反向代理。
 
 ### Linux 服务安装（Ubuntu / Debian）
 
-CI 会构建可安装的 `.deb`。下载对应版本的包后，直接用 apt 安装，安装脚本会创建专用系统用户、虚拟环境、systemd 服务和随机后台令牌：
+CI 会构建可安装的 `.deb`。下载对应版本的包后，直接用 apt 安装，安装脚本会创建专用系统用户、虚拟环境和 systemd 服务：
 
 ```sh
 wget https://github.com/vdjango/minecraft-resource-translations/releases/latest/download/buggcraft-translation_0.1.5_all.deb
@@ -92,6 +96,8 @@ sudoedit /etc/buggcraft-translation.env
 ```
 
 本地构建包需要 Debian 系列系统的 `dpkg-deb`：`bash scripts/build_deb.sh`。服务默认只监听本机；公开部署时把 `TRANSLATION_HOST` 改为 `0.0.0.0`，再用 HTTPS 反向代理暴露 `/`。
+
+启动后直接打开网站，首次安装将自动进入配置向导。在站点入口步骤填写实际访问地址。
 
 ### Windows 服务安装
 
@@ -103,7 +109,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 Get-Service BuggcraftTranslation
 ```
 
-脚本生成本地 `.env`、注册 `BuggcraftTranslation` 服务并设置开机启动。模型 Key、SMTP 密码和管理员令牌只写入该目录的配置文件，不会打包进 exe。需要手动运行时直接执行 `mc-translate.exe`。
+脚本生成本地 `.env`、注册 `BuggcraftTranslation` 服务并设置开机启动。直接打开网站即可进入首次安装向导。模型 Key 和 SMTP 密码保存在服务端配置，不会打包进 exe。需要手动运行时直接执行 `mc-translate.exe`。
 
 ## 用 Docker 部署
 
@@ -118,7 +124,7 @@ docker compose logs -f translation
 
 ## 加入公共共享翻译网络
 
-完整部署教程见 [联邦节点指南](docs/federation.md)。流程只有四步：
+完整部署教程见 [联邦节点指南](docs/联邦接入.md)。流程只有四步：
 
 1. 准备 Docker、域名和 HTTPS，把仓库部署到自己的服务器。
 2. 在 `.env` 设置 `TRANSLATION_FEDERATION_ROLE=mirror`、公共地址、主服务地址、节点名称和区域。
@@ -200,7 +206,7 @@ python scripts/benchmark_catalogue.py --projects 100000 --requests 100
 | `/admin` | 运行概览、预算和今日访问摘要 |
 | `/admin/traffic` | 服务访问、命中率、延迟和模型调用统计 |
 | `/admin/nodes` | 社区节点审批、验证、撤销和在线状态 |
-| `/admin/model` | 模型列表、推理档位、预算和单价 |
+| `/admin/settings` | 统一平台设置：翻译、下载、空间、节点流量、来源映射、域名缓存 |
 | `/admin/tasks` | 成功/失败筛选、错误详情和失败重试 |
 | `/admin/usage` | Token、费用及调用状态 |
 | `/admin/clients` | 启动器接入申请和应用 Key |
@@ -216,7 +222,7 @@ python scripts/browser_management.py
 python scripts/browser_admin_retries.py
 ```
 
-联邦和统计的后端回归包含在测试集，测试不调用付费模型。完整结果见 [docs/test-report.md](docs/test-report.md)。提交 API 改动时请同步 OpenAPI、在线文档、跨语言示例和测试。
+联邦和统计的后端回归包含在测试集，测试不调用付费模型。完整结果见 [docs/验证记录.md](docs/验证记录.md)。提交 API 改动时请同步 OpenAPI、在线文档、跨语言示例和测试。
 
 项目结构：`src/mc_translate` 是服务端、队列和 Web；`src/mc_translate/web/examples` 是接入示例；`tests` 是回归测试；`scripts` 是浏览器测试与压测；`docs` 是部署和扩容文档。
 
@@ -229,8 +235,14 @@ python scripts/browser_admin_retries.py
 - 统计不保存原始 IP、User-Agent 或设备明文；实例数分为上报和估算，不能作为精确用户数或计费依据。
 - 译文是机器生成内容，应保留原项目作者、来源链接和原文对照。
 
-扩容和后续对象存储、PostgreSQL、社区节点边界见 [带宽与联邦节点规划](docs/scaling-and-federation.md)。
+扩容和后续对象存储、PostgreSQL、社区节点边界见 [带宽与联邦节点规划](docs/扩容与联邦规划.md)。
 
 ## 许可
 
 本项目采用 [GNU AGPL-3.0](LICENSE)，与 Buggcraft 项目保持一致。第三方组件许可见 [THIRD-PARTY.txt](src/mc_translate/web/THIRD-PARTY.txt)，资源原文和图片归各自权利人所有。
+
+更多项目文档见 [文档索引](docs/文档索引.md)。
+
+游戏下载入口 `/#downloads`，后台 `/admin/settings#downloads`；缓存范围、G 盘容量实测及 Cloudflare 部署见 [资源镜像与容量研究](docs/资源镜像与容量研究.md)。旧入口自动跳转。
+
+支持六类独立策略、公开来源自动发现、30 分钟增量刷新、缓存配额与版本优先淘汰，以及按健康和流量预算转移下载。内置多个候选源，可添加新源；映射自动核验生成，国内优先，保留同文件的多个候选。后台显示每源覆盖、下载命中和文件明细，新增源匹配后可预览并选择清理本地副本，自动清理默认关闭。详见 [来源发现与清理](docs/来源发现与清理.md)、[镜像服务实施清单](docs/镜像服务实施清单.md) 和 [资源节点部署](docs/资源节点部署.md)。译文与下载节点在同一后台展示，使用各自的服务协议。
