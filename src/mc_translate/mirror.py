@@ -143,6 +143,8 @@ def upstreams(path):
         return ['https://cdn.modrinth.com' + quote(path[len('/mods/modrinth'):], safe='/@+')]
     if re.fullmatch(r'/mods/curseforge/files/[0-9]+/[0-9]+/[A-Za-z0-9._ +@-]+\.(?:jar|zip|mrpack|litemod)', path):
         return ['https://edge.forgecdn.net' + quote(path[len('/mods/curseforge'):], safe='/@+')]
+    if re.fullmatch(r'/mods/curseforge-mediafilez/files/[0-9]+/[0-9]+/[A-Za-z0-9._ +@-]+\.(?:jar|zip|mrpack|litemod)', path):
+        return ['https://mediafilez.forgecdn.net' + quote(path[len('/mods/curseforge-mediafilez'):], safe='/@+')]
     if path in ('/mc/game/version_manifest.json', '/mc/game/version_manifest_v2.json'):
         return [MANIFEST.replace('version_manifest_v2.json', path.rsplit('/', 1)[1])]
     if re.fullmatch(r'/assets/[a-f0-9]{2}/[a-f0-9]{40}', path):

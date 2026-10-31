@@ -8,7 +8,7 @@ MODES = ('cache', 'redirect', 'backup', 'disabled')
 
 def category_for(url, recorded=None):
     host, path = urlsplit(url).hostname, urlsplit(url).path
-    if host in ('cdn.modrinth.com', 'edge.forgecdn.net'):
+    if host in ('cdn.modrinth.com', 'edge.forgecdn.net', 'mediafilez.forgecdn.net'):
         return 'mods'
     if host == 'resources.download.minecraft.net' or recorded in ('assets', 'assets-metadata'):
         return 'assets'

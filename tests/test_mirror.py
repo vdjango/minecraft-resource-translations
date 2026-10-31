@@ -68,6 +68,8 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
                 'https://cdn.modrinth.com/data/project/versions/release/resources.zip',
             '/mods/curseforge/files/123/456/resources.zip':
                 'https://edge.forgecdn.net/files/123/456/resources.zip',
+            '/mods/curseforge-mediafilez/files/123/456/resources.zip':
+                'https://mediafilez.forgecdn.net/files/123/456/resources.zip',
         }
         for path, upstream in routes.items():
             with self.subTest(path=path):

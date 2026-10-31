@@ -19,7 +19,7 @@ HOSTS = {
     'maven.minecraftforge.net', 'files.minecraftforge.net', 'maven.neoforged.net',
     'meta.fabricmc.net', 'maven.fabricmc.net', 'meta.quiltmc.org', 'maven.quiltmc.org',
     'authlib-injector.yushi.moe',
-    'cdn.modrinth.com', 'edge.forgecdn.net',
+    'cdn.modrinth.com', 'edge.forgecdn.net', 'mediafilez.forgecdn.net',
 }
 PRIORITY = ContextVar('mirror_version_priority', default=0)
 
@@ -46,6 +46,7 @@ def route_for(url):
         'meta.quiltmc.org': '/quilt-meta', 'maven.quiltmc.org': '/quilt-maven',
         'authlib-injector.yushi.moe': '/mirrors/authlib-injector',
         'cdn.modrinth.com': '/mods/modrinth', 'edge.forgecdn.net': '/mods/curseforge',
+        'mediafilez.forgecdn.net': '/mods/curseforge-mediafilez',
     }.get(u.hostname, '')
     return prefix + u.path
 
