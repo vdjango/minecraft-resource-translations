@@ -1,11 +1,26 @@
 "use strict";
 function mirrorBytes(value){return (Number(value||0)/1024**3).toFixed(2)+' GiB';}
 const mirrorCategories=['core','loaders','mods','java','libraries','assets'];
+const roomCacheFields=['ttl_hours','quota_mib','max_file_mib','slow_kibps','probe_hours','probe_daily_mib'];
+function roomCacheSettings(){
+  return {room_cache_enabled:$('room-cache-enabled').checked,room_cache_probe_enabled:$('room-cache-probe-enabled').checked,
+    ...Object.fromEntries(roomCacheFields.map(key=>['room_cache_'+key,Number($('room-cache-'+key.replaceAll('_','-')).value)]))};
+}
+function renderRoomCache(data,fill){
+  const s=data.settings,state=data.room_client_cache||{};
+  if(fill){for(const key of roomCacheFields)$('room-cache-'+key.replaceAll('_','-')).value=s['room_cache_'+key];
+    $('room-cache-enabled').checked=s.room_cache_enabled;$('room-cache-probe-enabled').checked=s.room_cache_probe_enabled;}
+  $('room-cache-state').textContent=!data.running?'资源进程离线，设置仍可保存。':!state.configured?'尚未配置节点授权密钥；不会开放匿名上传。':s.room_cache_enabled?'节点授权已配置，按房间权限提供兜底。':'客户端文件兜底已关闭。';
+  metrics($('room-cache-metrics'),[['临时文件',number(state.files),'按 SHA-256 去重'],['临时占用',mirrorBytes(state.bytes),'上限 '+s.room_cache_quota_mib+' MiB'],['正在补传',number(state.uploads),'最多同时 2 个'],['正在读取',number(state.downloads),'到期清理会跳过正在读取的文件']]);
+  const row=values=>{const tr=document.createElement('tr');for(const value of values){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}return tr;};
+  $('room-cache-files').replaceChildren(...(state.recent||[]).map(file=>row([file.path,(file.size/1024**2).toFixed(2)+' MiB',state.reasons?.[file.reason]||file.reason||'等待计划',qualityTime(file.touched)])));
+  $('room-cache-sources').replaceChildren(...(state.sources||[]).map(source=>row([source.host,source.samples?source.speed.toFixed(0)+' KiB/s':'观察中',source.bad+' / '+source.samples,qualityTime(source.checked)])));
+}
 function mirrorRules(domain){
   const host=new URL(domain).hostname;
   const paths=['/_mirror_node/','/mc/game/','/v1/packages/','/v1/objects/','/v1/products/java-runtime/','/java/','/mods/','/maven/','/fabric-meta/','/fabric-maven/','/neoforge-maven/','/quilt-meta/','/quilt-maven/','/mirrors/authlib-injector/'];
   $('mirror-cf-expression').textContent=`(http.host eq "${host}" and http.request.method in {"GET" "HEAD"} and (${paths.map(p=>`starts_with(http.request.uri.path, "${p}")`).join(' or ')} or (starts_with(http.request.uri.path, "/assets/") and not (ends_with(http.request.uri.path, ".js") or ends_with(http.request.uri.path, ".css") or ends_with(http.request.uri.path, ".html")))))`;
-  $('mirror-cf-bypass').textContent=`(http.host eq "${host}" and (starts_with(http.request.uri.path, "/admin") or starts_with(http.request.uri.path, "/v1/admin/") or (starts_with(http.request.uri.path, "/v1/") and not (starts_with(http.request.uri.path, "/v1/packages/") or starts_with(http.request.uri.path, "/v1/objects/") or starts_with(http.request.uri.path, "/v1/products/java-runtime/"))) or starts_with(http.request.uri.path, "/mirror-api/") or http.cookie contains "translation_admin=" or any(http.request.headers["authorization"][*] ne "")))`;
+  $('mirror-cf-bypass').textContent=`(http.host eq "${host}" and (starts_with(http.request.uri.path, "/admin") or starts_with(http.request.uri.path, "/v1/admin/") or (starts_with(http.request.uri.path, "/v1/") and not (starts_with(http.request.uri.path, "/v1/packages/") or starts_with(http.request.uri.path, "/v1/objects/") or starts_with(http.request.uri.path, "/v1/products/java-runtime/"))) or starts_with(http.request.uri.path, "/room-cache/") or starts_with(http.request.uri.path, "/mirror-api/") or http.cookie contains "translation_admin=" or any(http.request.headers["authorization"][*] ne "")))`;
 }
 let mirrorLoaded=false;
 function renderMirror(data,fill=false){
@@ -27,7 +42,7 @@ function renderMirror(data,fill=false){
   $('mirror-refresh-state').textContent=s.auto_refresh?'下次检查：'+(data.refresh?.next_at?new Date(data.refresh.next_at*1000).toLocaleString('zh-CN'):'正在安排'):'定时刷新已关闭';
   $('mirror-node-status').replaceChildren(...(data.nodes||[]).map(n=>{const span=document.createElement('span');span.textContent=new URL(n.url).hostname+' · '+(!n.enabled?'停用':n.healthy?'在线':'检查中 / 不可用');return span;}));
   $('mirror-egress-state').textContent=data.egress?`本月（UTC ${data.egress.period}）已接受资源 ${mirrorBytes(data.egress.bytes)} · 最近一分钟 ${mirrorBytes(data.egress.window_bytes)} · ${data.accepting?'本机可继续接收':'将优先转移下载'}`:'镜像上线后显示资源出口统计';
-  renderSourceStatistics(data);renderQuality(data);mirrorRules(s.public_url);
+  renderSourceStatistics(data);renderQuality(data);renderRoomCache(data,fillSettings);mirrorRules(s.public_url);
   const states={idle:'空闲',running:'运行中',finished:'已完成',failed:'失败',cancelled:'已停止',disk_limit:'已到空间保护线',incomplete:'部分完成，请检查错误后重试'};
   const job=data.job||{state:'idle'};
   $('mirror-job-state').textContent=(states[job.state]||job.state)+(job.total!=null?` · ${number(job.done)} / ${number(job.total)}`:'')+(job.skipped!=null?` · 策略跳过 ${number(job.skipped)} · 下载失败 ${number(job.errors)}`:'')+(job.error?' · '+job.error:'');
@@ -39,7 +54,7 @@ function renderMirror(data,fill=false){
 async function loadMirror(){renderMirror(await api('v1/admin/mirror'));}
 $('mirror-refresh').onclick=()=>loadMirror().catch(showError);
 function mirrorSettings(){
-  return {quality_enabled:$('quality-enabled').checked,quality_adaptive_cache:$('quality-adaptive-cache').checked,...Object.fromEntries(['interval_hours','daily_mib','sample_kib','fast_kibps','slow_kibps'].map(key=>['quality_'+key,Number($('quality-'+key.replaceAll('_','-')).value)])),public_url:$('mirror-url').value.trim(),quota_gib:Number($('mirror-quota').value),reserve_gib:Number($('mirror-reserve').value),concurrency:Number($('mirror-concurrency').value),metadata_ttl:Number($('mirror-ttl').value),enabled:$('mirror-enabled').checked,policies:Object.fromEntries(mirrorCategories.map(key=>[key,$('mirror-policy-'+key).value])),eviction:$('mirror-eviction').value,protect_latest:Number($('mirror-protect').value),auto_refresh:$('mirror-auto-refresh').checked,refresh_minutes:Number($('mirror-refresh-minutes').value),node_weight:Number($('mirror-node-weight').value),monthly_egress_gib:Number($('mirror-monthly-egress').value),egress_threshold:Number($('mirror-egress-threshold').value),bandwidth_mbps:Number($('mirror-bandwidth').value),max_serving:Number($('mirror-max-serving').value),nodes:$('mirror-nodes').value.split('\n').map(line=>line.trim()).filter(Boolean).map(line=>{const parts=line.split(/\s+/);if(parts.length>3||parts[2]&&parts[2]!=='off')throw Error('节点每行应为：HTTPS 地址、权重，以及可选的 off。');return {url:parts[0],weight:Number(parts[1]||1),enabled:parts[2]!=='off'};}),auto_sources:$('mirror-auto-sources').checked,source_prefer_cn:$('mirror-source-prefer-cn').checked,source_cleanup:$('mirror-source-cleanup').checked,source_registries:readSourceProviders()};
+  return {...roomCacheSettings(),quality_enabled:$('quality-enabled').checked,quality_adaptive_cache:$('quality-adaptive-cache').checked,...Object.fromEntries(['interval_hours','daily_mib','sample_kib','fast_kibps','slow_kibps'].map(key=>['quality_'+key,Number($('quality-'+key.replaceAll('_','-')).value)])),public_url:$('mirror-url').value.trim(),quota_gib:Number($('mirror-quota').value),reserve_gib:Number($('mirror-reserve').value),concurrency:Number($('mirror-concurrency').value),metadata_ttl:Number($('mirror-ttl').value),enabled:$('mirror-enabled').checked,policies:Object.fromEntries(mirrorCategories.map(key=>[key,$('mirror-policy-'+key).value])),eviction:$('mirror-eviction').value,protect_latest:Number($('mirror-protect').value),auto_refresh:$('mirror-auto-refresh').checked,refresh_minutes:Number($('mirror-refresh-minutes').value),node_weight:Number($('mirror-node-weight').value),monthly_egress_gib:Number($('mirror-monthly-egress').value),egress_threshold:Number($('mirror-egress-threshold').value),bandwidth_mbps:Number($('mirror-bandwidth').value),max_serving:Number($('mirror-max-serving').value),nodes:$('mirror-nodes').value.split('\n').map(line=>line.trim()).filter(Boolean).map(line=>{const parts=line.split(/\s+/);if(parts.length>3||parts[2]&&parts[2]!=='off')throw Error('节点每行应为：HTTPS 地址、权重，以及可选的 off。');return {url:parts[0],weight:Number(parts[1]||1),enabled:parts[2]!=='off'};}),auto_sources:$('mirror-auto-sources').checked,source_prefer_cn:$('mirror-source-prefer-cn').checked,source_cleanup:$('mirror-source-cleanup').checked,source_registries:readSourceProviders()};
 }
 $('mirror-settings').onsubmit=async event=>{event.preventDefault();const button=event.submitter;button.disabled=true;try{renderMirror(await api('v1/admin/mirror',mirrorSettings()),true);message('资源分发设置已保存。');}catch(e){showError(e);}finally{button.disabled=false;}};
 for(const key of mirrorCategories)$('mirror-policy-'+key).onchange=event=>{event.target.closest('label').dataset.mode=event.target.value;};

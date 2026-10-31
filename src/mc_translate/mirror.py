@@ -26,13 +26,15 @@ from .federation import origin, PublicResolver
 from .mirror_sources import BUILTIN_SOURCES, SourceDiscovery, effective_sources, source_status, validate_registries
 from .mirror_source_management import SourceManagement
 from .mirror_quality import QUALITY_DEFAULTS, SourceQuality
+from .room_cache import RoomCache, DEFAULTS as ROOM_CACHE_DEFAULTS, validate_settings as validate_room_cache
 
 GIB = 1024 ** 3
 DEFAULTS = dict(enabled=True, public_url='https://mirror.bugg.icu', quota_gib=400,
                 reserve_gib=100, concurrency=4, metadata_ttl=300, policies=POLICIES,
                 auto_refresh=True, refresh_minutes=30, eviction='oldest_version',
                 protect_latest=2, nodes=[], node_weight=1, auto_sources=True, source_prefer_cn=True,
-                source_cleanup=False, source_registries=BUILTIN_SOURCES, **ROUTING_DEFAULTS, **QUALITY_DEFAULTS)
+                source_cleanup=False, source_registries=BUILTIN_SOURCES, **ROUTING_DEFAULTS, **QUALITY_DEFAULTS,
+                **ROOM_CACHE_DEFAULTS)
 
 
 class PinnedFileResponse(web.FileResponse):
@@ -122,6 +124,7 @@ def validate_settings(data):
             raise ValueError('invalid ' + key)
     if result['quality_slow_kibps'] >= result['quality_fast_kibps']:
         raise ValueError('slow speed must be below fast speed')
+    validate_room_cache(result)
     return result
 
 
@@ -211,6 +214,7 @@ class Mirror:
         self.token_path = self.root / 'control-token'
         self.sources = SourceManagement(self)
         self.quality = SourceQuality(self)
+        self.room_cache = RoomCache(self, lambda: read_settings(self.config))
 
     async def open(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -260,10 +264,12 @@ class Mirror:
         # Interrupted partial files are never published; remove only our temp files.
         for file in (self.root / 'tmp').glob('*.part'):
             file.unlink(missing_ok=True)
+        await self.room_cache.open()
         self.scheduler = asyncio.create_task(self.refresh_loop())
         return self
 
     async def close(self):
+        await self.room_cache.close()
         await self.quality.close()
         tasks = [t for t in [self.scheduler, self.job, self.source_job, *self.backups.values(), *self.probes.values(), *self.inflight.values()] if t]
         for task in tasks:
@@ -297,6 +303,7 @@ class Mirror:
                     automatic_sources=source_status(self.root),
                     source_statistics=await self.sources.summary(),
                     source_quality=await self.quality.snapshot(),
+                    room_client_cache=await self.room_cache.snapshot(),
                     egress=await self.egress.snapshot(settings),
                     accepting=not await self.egress.reason(1, settings, sum(self.serving.values())),
                     nodes=[dict(n, healthy=self.node_health.get(n['url'], {}).get('healthy', False)) for n in settings['nodes']],
@@ -855,7 +862,8 @@ async def mirror_boundary(request, handler):
     try:
         return await handler(request)
     except web.HTTPException as exc:
-        return web.Response(status=exc.status, text=exc.text, headers={'Cache-Control': 'no-store', **({'Retry-After': exc.headers['Retry-After']} if 'Retry-After' in exc.headers else {})})
+        return web.Response(status=exc.status, text=exc.text, headers={'Cache-Control': 'no-store',
+            **{key: exc.headers[key] for key in ('Location', 'Retry-After', 'Content-Range', 'WWW-Authenticate') if key in exc.headers}})
 
 
 async def create_mirror(config):
@@ -865,6 +873,10 @@ async def create_mirror(config):
     app.router.add_get('/mirror-api/status', mirror.public_status)
     app.router.add_get('/_internal/control', mirror.control)
     app.router.add_post('/_internal/control', mirror.control)
+    app.router.add_post('/room-cache/plan', mirror.room_cache.plan)
+    app.router.add_post('/room-cache/resolve', mirror.room_cache.resolve)
+    app.router.add_put('/room-cache/files/{digest:[0-9a-f]{64}}', mirror.room_cache.upload)
+    app.router.add_get('/room-cache/files/{digest:[0-9a-f]{64}}', mirror.room_cache.download)
     app.router.add_get('/{path:.*}', mirror.resource)
     async def close(app):
         await mirror.close()

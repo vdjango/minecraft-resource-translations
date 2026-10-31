@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import SiteNav from '../SiteNav.vue';
 import AdminAccess from '../AdminAccess.vue';
+import RoomClientCacheSettings from '../RoomClientCacheSettings.vue';
 import {onMounted, onUnmounted, ref} from 'vue';
-const settingsTabs=[['translation','翻译服务'],['downloads','下载策略'],['storage','存储与同步'],['distribution','节点与流量'],['sources','公开来源'],['quality','来源质量'],['cloudflare','域名与缓存']];
+const settingsTabs=[['translation','翻译服务'],['downloads','下载策略'],['storage','存储与同步'],['distribution','节点与流量'],['sources','公开来源'],['quality','来源质量'],['room-cache','客户端兜底'],['cloudflare','域名与缓存']];
 const selected=ref('downloads');
 function restoreTab(){const key=location.hash.slice(1);selected.value=settingsTabs.some(tab=>tab[0]===key)?key:'downloads';}
 function selectTab(key:string){selected.value=key;history.replaceState(null,'','#'+key);}
@@ -43,6 +44,7 @@ defineProps<{seed:Record<string,string>;views:any}>();
 <div class="action-row"><button id="quality-probe-all" type="button" class="secondary">安排一轮采样</button></div><p id="quality-budget" role="status" class="muted small"></p></div>
 <div class="admin-card"><div class="section-heading"><h3>来源表现</h3><span class="badge">近 7 天 · 记录保留 30 天</span></div><div class="table-scroll"><table><thead><tr><th>来源 / 评级</th><th>采样速度</th><th>可用率 / 样本</th><th>下次采样</th><th>管理</th></tr></thead><tbody id="quality-sources"></tbody></table></div><p class="muted small">样本不足显示“观察中”，不凭一次测速淘汰来源。优先缓存仍服从六类资源策略、空间和流量预算；纯重定向与关闭的类别不会因此写入本地。</p></div>
 <div id="quality-history-panel" class="admin-card" hidden><div class="section-heading"><h3 id="quality-history-title">采样记录</h3><button id="quality-history-close" type="button" class="secondary">收起</button></div><div class="table-scroll"><table><thead><tr><th>时间</th><th>结果</th><th>速度</th><th>首字节</th><th>采样大小</th></tr></thead><tbody id="quality-history"></tbody></table></div></div></div>
+<RoomClientCacheSettings v-show="selected==='room-cache'" />
 <div class="settings-save-bar"><span class="muted small">保存全部下载设置；后台任务不会中断。</span><button type="submit">保存资源分发设置</button></div></form><div v-show="selected==='storage'" class="settings-operations"><section class="admin-card"><h3>本地资源清单与同步</h3><p class="muted small">先扫描全版本官方元数据，按 SHA-1 去重统计。扫描只下载小型 JSON；预下载只保存“本地缓存”与“备份并重定向”的类别，跳过纯重定向与关闭的类别。400 GiB 默认上限与 100 GiB 磁盘余量保护会阻止继续写入。</p><div class="mirror-admin-actions"><button id="mirror-inventory" type="button" class="secondary">扫描清单与容量</button><button id="mirror-sync" type="button" class="secondary">&#31435;&#21363;&#22686;&#37327;&#21047;&#26032;</button><button id="mirror-prefetch" type="button">开始 / 继续预下载</button><button id="mirror-cancel" type="button" class="secondary">停止后台任务</button></div><p id="mirror-job-state" role="status"></p><pre id="mirror-report" class="mirror-admin-log">暂无清单。</pre><p class="muted small">此清单测量原版全版本与当前 Java；Forge、NeoForge、Fabric、Quilt 历史 Maven、旧版 Java、OptiFine 等单独列为未测量。不能把它当成 BMCLAPI 全站占用。加载器支持按需缓存。</p></section></div>
 <section id="settings-cloudflare" role="tabpanel" aria-labelledby="tab-cloudflare" v-show="selected==='cloudflare'" class="admin-card mirror-guide"><div class="section-caption">CLOUDFLARE SETUP</div><h3>Cloudflare 与域名配置指南</h3><p>目标域名 mirror.bugg.icu。翻译平台的原域名继续可用，先检查新域名的 HTTPS、回源与下载，再切换启动器。</p>
 <details open><summary>1. DNS 与 HTTPS</summary><p>公网服务器添加 mirror 的 A / AAAA 记录，开启橙云代理；SSL/TLS 使用 Full (strict)，源站安装有效证书。只有 IPv6 可达时不要添加无效 A 记录。本地电脑可通过 Cloudflare Tunnel 接入，无需暴露磁盘或管理端口。</p><p>本地 Tunnel 分流：/assets/ 下的脚本、样式、图标去 18448；/assets/两位哈希/完整SHA-1 去 18449；/java、/mods、/maven、/v1/packages、/v1/objects、/v1/products/java-runtime 及加载器路径去 18449，其余去 18448。完整示例见仓库 deploy/cloudflared-mirror.yml。</p></details>

@@ -16,13 +16,17 @@ def template(path):
     return path.read_text(encoding='utf-8').split('<template>', 1)[1].rsplit('</template>', 1)[0]
 
 
-def render():
+def render(only=None):
     for name in ('index', 'mirror', 'docs', 'developers', *(p.stem for p in sorted(PAGES.glob('admin*.vue')))):
+        if only is not None and name not in only:
+            continue
         html_path = WEB / (name + '.html')
         original = html_path.read_text(encoding='utf-8')
         body = template(PAGES / (name + '.vue'))
         for component in ('ResourceDownloads', 'ServiceNetwork'):
             body = body.replace('<' + component + ' />', template(ROOT / 'frontend/src' / (component + '.vue')))
+        body = body.replace('<RoomClientCacheSettings v-show="selected===\'room-cache\'" />',
+                            template(ROOT / 'frontend/src/RoomClientCacheSettings.vue'))
         body = body.replace('<SiteNav />', navigation(name))
         # Use an unchanged page as the shared non-JavaScript login fallback.
         access_source = (WEB / 'admin-mail.html').read_text(encoding='utf-8')
@@ -36,7 +40,7 @@ def render():
         body = re.sub(r'<a v-for="node in nodes".*?</a>', '', body, flags=re.S)
         body = re.sub(r'<button v-for="tab in settingsTabs".*?</button>',
                       ''.join(f'<a href="#{key}">{label}</a>' for key, label in
-                              ([('downloads','下载策略'),('storage','存储与同步'),('distribution','节点与流量'),('sources','公开来源'),('quality','来源质量'),('cloudflare','域名与缓存')] if name=='admin-mirror' else [('translation','翻译服务')])), body, flags=re.S)
+                              ([('downloads','下载策略'),('storage','存储与同步'),('distribution','节点与流量'),('sources','公开来源'),('quality','来源质量'),('room-cache','客户端兜底'),('cloudflare','域名与缓存')] if name=='admin-mirror' else [('translation','翻译服务')])), body, flags=re.S)
         body = re.sub(r' v-show="[^"]*"', '', body)
         body = re.sub(r' @click="[^"]*"', '', body)
         body = re.sub(r' v-if="[^"]*"', '', body)
@@ -48,7 +52,8 @@ def render():
             if '/assets/' + css not in head and '"assets/' + css not in head:
                 head = head.replace('</head>', f'<link rel="stylesheet" href="/assets/{css}"></head>')
         html_path.write_text(head + '<body>' + body + '</body></html>', encoding='utf-8')
-    sync_navigation()
+    if only is None:
+        sync_navigation()
 
 
 if __name__ == '__main__':

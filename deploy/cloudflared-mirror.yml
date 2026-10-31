@@ -2,6 +2,9 @@
 # Supply your existing tunnel UUID and credentials-file in the complete config.
 ingress:
   - hostname: mirror.bugg.icu
+    path: ^/room-cache/
+    service: http://127.0.0.1:18449
+  - hostname: mirror.bugg.icu
     path: ^/_mirror_node/
     service: http://127.0.0.1:18449
   - hostname: mirror.bugg.icu
