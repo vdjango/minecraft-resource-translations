@@ -33,7 +33,7 @@ export default defineConfig({
         updated=updated.replace(/<link rel="modulepreload"[^>]*>\s*/g,'');
         if(name==='index')updated=updated.replace(/<script src="\/?assets\/(?:markdown-it|purify)\.min\.js(?:\?[^"<>]*)?" defer><\/script>/g,'');
         updated=updated.replace('</head>',[...dependencies].map(file=>`<link rel="modulepreload" href="/assets/${file}">`).join('')+'</head>');
-        updated=updated.replace(/(src|href)="\/assets\/([^"?]+\.(?:js|css))(?:\?v=[^"]*)?"/g,(match,attribute,file)=>{const path=resolve(web,file);return !file.startsWith('vue-runtime-')&&existsSync(path)?`${attribute}="/assets/${file}?v=${createHash('sha256').update(readFileSync(path)).digest('hex').slice(0,12)}"`:match;});
+        updated=updated.replace(/(src|href)="\/?assets\/([^"?]+\.(?:js|css))(?:\?v=[^"]*)?"/g,(match,attribute,file)=>{const path=resolve(web,file);return !file.startsWith('vue-runtime-')&&existsSync(path)?`${attribute}="/assets/${file}?v=${createHash('sha256').update(readFileSync(path)).digest('hex').slice(0,12)}"`:match;});
         if(previous!==updated)writeFileSync(html,updated);
       }
     },
