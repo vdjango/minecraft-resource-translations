@@ -23,7 +23,7 @@ function showError(error) { message(error.message, true); }
 function loading(hostId,buttonId,busy) {
   const host=$(hostId),button=$(buttonId);
   if(host){host.setAttribute("aria-busy",String(busy));if(busy&&!host.childElementCount){const hint=node("p","正在加载，请稍候…");hint.className="record-empty";hint.dataset.loading="true";host.append(hint);}if(!busy)host.querySelectorAll("[data-loading]").forEach(e=>e.remove());}
-  if(button){button.disabled=busy;if(busy){button.dataset.idleLabel||=button.textContent;button.textContent="正在加载…";}else if(button.dataset.idleLabel)button.textContent=button.dataset.idleLabel;}
+  if(button)button.disabled=busy;
 }
 async function section(hostId,buttonId,action) {
   loading(hostId,buttonId,true);

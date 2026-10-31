@@ -13,7 +13,6 @@ function renderRoomCache(data,fill){
   $('room-cache-state').textContent=!data.running?'资源进程离线，设置仍可保存。':!state.configured?'尚未配置节点授权密钥；不会开放匿名上传。':s.room_cache_enabled?'节点授权已配置，按房间权限提供兜底。':'客户端文件兜底已关闭。';
   metrics($('room-cache-metrics'),[['临时文件',number(state.files),'按 SHA-256 去重'],['临时占用',mirrorBytes(state.bytes),'上限 '+s.room_cache_quota_mib+' MiB'],['正在补传',number(state.uploads),'最多同时 2 个'],['正在读取',number(state.downloads),'到期清理会跳过正在读取的文件']]);
   const row=values=>{const tr=document.createElement('tr');for(const value of values){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}return tr;};
-  $('room-cache-files').replaceChildren(...(state.recent||[]).map(file=>row([file.path,(file.size/1024**2).toFixed(2)+' MiB',state.reasons?.[file.reason]||file.reason||'等待计划',qualityTime(file.touched)])));
   $('room-cache-sources').replaceChildren(...(state.sources||[]).map(source=>row([source.host,source.samples?source.speed.toFixed(0)+' KiB/s':'观察中',source.bad+' / '+source.samples,qualityTime(source.checked)])));
 }
 function mirrorRules(domain){
@@ -39,30 +38,96 @@ function renderMirror(data,fill=false){
     $('mirror-auto-sources').checked=s.auto_sources!==false;$('mirror-source-prefer-cn').checked=s.source_prefer_cn!==false;$('mirror-source-cleanup').checked=!!s.source_cleanup;
   }
   for(const key of mirrorCategories)$('mirror-policy-'+key).closest('label').dataset.mode=$('mirror-policy-'+key).value;
-  $('mirror-refresh-state').textContent=s.auto_refresh?'下次检查：'+(data.refresh?.next_at?new Date(data.refresh.next_at*1000).toLocaleString('zh-CN'):'正在安排'):'定时刷新已关闭';
+  const schedule=s.auto_refresh?'下次自动同步：'+(data.refresh?.next_at?new Date(data.refresh.next_at*1000).toLocaleString('zh-CN'):'正在安排'):'定时同步已关闭';
+  $('mirror-overview-schedule').textContent=schedule;
+  $('mirror-task-schedule').textContent=schedule+' · 周期 '+s.refresh_minutes+' 分钟';
+  const last=data.refresh?.last;
+  $('mirror-overview-last').textContent=last?'上次同步：'+qualityTime(last.at)+' · '+(last.state||'已完成'):'尚无自动同步记录';
+  const room=data.room_client_cache||{};
+  $('room-cache-overview').textContent=number(room.files)+' 个实际文件 · '+mirrorBytes(room.bytes)+' / '+(s.room_cache_quota_mib||0)+' MiB 限额';
+  $('mirror-storage-bars').replaceChildren(...[['镜像缓存',data.cached_bytes,s.quota_gib*1024**3],['客户端临时缓存',room.bytes,s.room_cache_quota_mib*1024**2]].map(([label,used,limit])=>{
+    const host=sourceElement('div');host.className='mirror-storage-row';const top=sourceElement('div');top.append(sourceElement('strong',label),sourceElement('span',mirrorBytes(used)+' / '+mirrorBytes(limit)));
+    const meter=document.createElement('meter');meter.min=0;meter.max=Number(limit)||1;meter.value=Math.min(Number(used)||0,Number(limit)||1);host.append(top,meter);return host;
+  }));
   $('mirror-node-status').replaceChildren(...(data.nodes||[]).map(n=>{const span=document.createElement('span');span.textContent=new URL(n.url).hostname+' · '+(!n.enabled?'停用':n.healthy?'在线':'检查中 / 不可用');return span;}));
   $('mirror-egress-state').textContent=data.egress?`本月（UTC ${data.egress.period}）已接受资源 ${mirrorBytes(data.egress.bytes)} · 最近一分钟 ${mirrorBytes(data.egress.window_bytes)} · ${data.accepting?'本机可继续接收':'将优先转移下载'}`:'镜像上线后显示资源出口统计';
   renderSourceStatistics(data);renderQuality(data);renderRoomCache(data,fillSettings);mirrorRules(s.public_url);
   const states={idle:'空闲',running:'运行中',finished:'已完成',failed:'失败',cancelled:'已停止',disk_limit:'已到空间保护线',incomplete:'部分完成，请检查错误后重试'};
+  const actions={refresh:'自动同步',inventory:'清单扫描',prefetch:'预下载',source_cleanup:'本地副本清理',source_scan:'来源映射扫描'};
   const job=data.job||{state:'idle'};
+  const op=data.operations||{};
+  $('mirror-overview-job').textContent=job.action?((actions[job.action]||job.action)+' · '+(states[job.state]||job.state)):'暂无正在执行的同步任务';
   $('mirror-job-state').textContent=(states[job.state]||job.state)+(job.total!=null?` · ${number(job.done)} / ${number(job.total)}`:'')+(job.skipped!=null?` · 策略跳过 ${number(job.skipped)} · 下载失败 ${number(job.errors)}`:'')+(job.error?' · '+job.error:'');
   if(job.action==='source_cleanup')$('mirror-job-state').textContent='本地副本清理 · '+(states[job.state]||job.state)+' · 已检查 '+number(job.done)+' / '+number(job.total)+' · 移除 '+number(job.removed)+' · 释放 '+mirrorBytes(job.freed_bytes)+' · 跳过 '+number(job.skipped);
+  const progress=job.progress||{};
+  const processed=Number(job.done??progress.done??0),total=Number(job.total??progress.total??0);
+  $('mirror-job-progress').replaceChildren();
+  if(total>0){const label=sourceElement('p',number(processed)+' / '+number(total)+' 个文件 · '+Math.min(100,processed/total*100).toFixed(1)+'%');const bar=document.createElement('progress');bar.max=total;bar.value=Math.min(processed,total);$('mirror-job-progress').append(label,bar);}
+  $('mirror-job-failures').replaceChildren(...(job.failed||[]).slice(-8).map(row=>sourceElement('p',(row.path||row.url||'未知文件')+' · '+(row.error||'下载失败'))));
+  const transferRows=(op.transfers||[]).map(item=>[new URL(item.url).pathname,mirrorBytes(item.bytes)+(item.total?' / '+mirrorBytes(item.total):''),qualitySpeed(item.speed),qualityTime(item.started_at)]);
+  const makeRow=values=>{const tr=sourceElement('tr');for(const value of values)tr.append(sourceElement('td',value));return tr;};
+  $('mirror-transfers').replaceChildren(...(transferRows.length?transferRows:[['暂无正在回源的文件','—','—','—']]).map(makeRow));
+  const scan=op.source_scan||{};
+  $('mirror-background-activities').replaceChildren(sourceElement('p',op.source_scanning?'来源映射正在分批扫描':scan.finished_at?'上次来源映射：'+qualityTime(scan.finished_at)+' · '+({finished:'已完成',failed:'失败'}[scan.state]||scan.state):'来源映射扫描空闲'),sourceElement('p','已为进行中的下载预留 '+mirrorBytes(op.reserved_bytes)));
+  $('mirror-job-history').replaceChildren(...(op.history?.length?op.history:[{action:'暂无记录',state:'idle'}]).map(item=>makeRow([actions[item.action]||item.action||'同步',states[item.state]||item.state,'完成 '+number(item.done)+' / '+number(item.total)+' · 失败 '+number(item.errors),qualityTime(item.started_at)+(item.finished_at?' / '+qualityTime(item.finished_at):' / 进行中')])));
   const report=data.inventory||job.report;
   $('mirror-report').textContent=JSON.stringify(report?{...report,known_GiB:Number((report.known_bytes/1024**3).toFixed(2)),selected_local_GiB:data.selection?Number((data.selection.local_bytes/1024**3).toFixed(2)):undefined,job}:job,null,2);
   const busy=job.state==='running';$('mirror-inventory').disabled=!data.running||busy;$('mirror-sync').disabled=!data.running||busy;$('mirror-prefetch').disabled=!data.running||busy||!report?.complete;$('mirror-cancel').disabled=!busy;
 }
-async function loadMirror(){renderMirror(await api('v1/admin/mirror'));}
-$('mirror-refresh').onclick=()=>loadMirror().catch(showError);
+let mirrorLoading=false,mirrorViewInitialized=false,lastMirrorPoll=0;
+async function loadMirror(){
+  if(mirrorLoading)return;
+  mirrorLoading=true;
+  try{
+    const data=await api('v1/admin/mirror');
+    renderMirror(data);
+    if(!mirrorViewInitialized&&data.running){mirrorViewInitialized=true;await loadMirrorView();}
+  }finally{mirrorLoading=false;}
+}
+$('mirror-refresh').onclick=()=>{void (async()=>{const loaded=mirrorViewInitialized;await loadMirror();if(loaded)await loadMirrorView();})().catch(showError);};
 function mirrorSettings(){
   return {...roomCacheSettings(),quality_enabled:$('quality-enabled').checked,quality_adaptive_cache:$('quality-adaptive-cache').checked,...Object.fromEntries(['interval_hours','daily_mib','sample_kib','fast_kibps','slow_kibps'].map(key=>['quality_'+key,Number($('quality-'+key.replaceAll('_','-')).value)])),public_url:$('mirror-url').value.trim(),quota_gib:Number($('mirror-quota').value),reserve_gib:Number($('mirror-reserve').value),concurrency:Number($('mirror-concurrency').value),metadata_ttl:Number($('mirror-ttl').value),enabled:$('mirror-enabled').checked,policies:Object.fromEntries(mirrorCategories.map(key=>[key,$('mirror-policy-'+key).value])),eviction:$('mirror-eviction').value,protect_latest:Number($('mirror-protect').value),auto_refresh:$('mirror-auto-refresh').checked,refresh_minutes:Number($('mirror-refresh-minutes').value),node_weight:Number($('mirror-node-weight').value),monthly_egress_gib:Number($('mirror-monthly-egress').value),egress_threshold:Number($('mirror-egress-threshold').value),bandwidth_mbps:Number($('mirror-bandwidth').value),max_serving:Number($('mirror-max-serving').value),nodes:$('mirror-nodes').value.split('\n').map(line=>line.trim()).filter(Boolean).map(line=>{const parts=line.split(/\s+/);if(parts.length>3||parts[2]&&parts[2]!=='off')throw Error('节点每行应为：HTTPS 地址、权重，以及可选的 off。');return {url:parts[0],weight:Number(parts[1]||1),enabled:parts[2]!=='off'};}),auto_sources:$('mirror-auto-sources').checked,source_prefer_cn:$('mirror-source-prefer-cn').checked,source_cleanup:$('mirror-source-cleanup').checked,source_registries:readSourceProviders()};
 }
 $('mirror-settings').onsubmit=async event=>{event.preventDefault();const button=event.submitter;button.disabled=true;try{renderMirror(await api('v1/admin/mirror',mirrorSettings()),true);message('资源分发设置已保存。');}catch(e){showError(e);}finally{button.disabled=false;}};
 for(const key of mirrorCategories)$('mirror-policy-'+key).onchange=event=>{event.target.closest('label').dataset.mode=event.target.value;};
 for(const action of ['inventory','prefetch','cancel','refresh'])$(action==='refresh'?'mirror-sync':'mirror-'+action).onclick=async event=>{const button=event.currentTarget;button.disabled=true;try{renderMirror(await api('v1/admin/mirror',{action}));message(action==='cancel'?'后台同步任务已停止；正在提供服务的文件保留。':'后台任务已提交，可刷新查看进度。');}catch(e){showError(e);button.disabled=false;}};
-const mirrorPoll=setInterval(()=>{if(!$('panel').classList.contains('hidden'))void loadMirror().catch(showError);},15000);
+const mirrorPoll=setInterval(()=>{
+  if(document.visibilityState!=='visible'||$('panel').classList.contains('hidden'))return;
+  const view=$('panel').dataset.mirrorView,interval=['overview','tasks','temporary'].includes(view)?5000:15000;
+  if(Date.now()-lastMirrorPoll<interval)return;
+  lastMirrorPoll=Date.now();
+  void loadMirror().catch(showError);
+},5000);
 
 let sourceOffset=0,sourceNext=null;
 function sourceElement(tag,text){const node=document.createElement(tag);if(text!=null)node.textContent=String(text);return node;}
+let cachePage=0,cacheCursors=[null],cacheNext=null,roomPage=0,roomCursors=[null],roomNext=null;
+function observationRow(values){const row=sourceElement('tr');for(const value of values){const cell=sourceElement('td');if(value instanceof Node)cell.append(value);else cell.textContent=String(value);row.append(cell);}return row;}
+function fileNameCell(path,hash){const host=sourceElement('div');host.className='observation-file';host.append(sourceElement('strong',path||'未知文件'),sourceElement('small',hash||'未记录校验值'));return host;}
+async function loadCacheFiles(){
+  const data=await api('v1/admin/mirror',{action:'cache_files',query:$('cache-files-query').value.trim(),category:$('cache-files-category').value,cursor:cacheCursors[cachePage]});
+  cacheNext=data.next_cursor;
+  const rows=(data.files||[]).map(file=>observationRow([fileNameCell(file.path,file.sha1||file.object),({core:'游戏核心',loaders:'加载器',mods:'模组',java:'Java',libraries:'依赖库',assets:'原版资源'})[file.category]||file.category,(file.size/1024**2).toFixed(2)+' MiB','本地 · '+file.object.slice(0,12),qualityTime(file.fetched)]));
+  $('cache-files').replaceChildren(...(rows.length?rows:[observationRow(['当前筛选没有已缓存文件','—','—','—','—'])]));
+  $('cache-files-count').textContent='第 '+(cachePage+1)+' 页 · 本页 '+rows.length+' 个文件；仅显示实际缓存索引，不把重定向映射算作本地文件。';
+  $('cache-files-page').textContent='第 '+(cachePage+1)+' 页';$('cache-files-prev').disabled=cachePage===0;$('cache-files-next').disabled=!cacheNext;
+}
+async function loadRoomFiles(){
+  const data=await api('v1/admin/mirror',{action:'room_files',query:$('room-files-query').value.trim(),cursor:roomCursors[roomPage]});
+  roomNext=data.next_cursor;
+  const states={uploading:'正在补传',cached:'已缓存',awaiting_upload:'等待补传',redirect:'外部直下',expired:'已到期'};
+  const rows=(data.files||[]).map(file=>observationRow([fileNameCell(file.path,file.digest),(states[file.state]||file.state)+' · '+(file.reason||'按来源计划'),(file.size/1024**2).toFixed(2)+' / '+((file.stored_bytes||0)/1024**2).toFixed(2)+' MiB',file.stored_bytes!=null?'本地缓存':file.state==='uploading'?'正在上传':'不占本地空间',qualityTime(file.expires_at)+' · '+number(file.references_count)+' 处引用'+(file.readers?' · '+number(file.readers)+' 个读取':'')]));
+  $('room-files').replaceChildren(...(rows.length?rows:[observationRow(['当前筛选没有临时文件','—','—','—','—'])]));
+  $('room-files-count').textContent='第 '+(roomPage+1)+' 页 · 本页 '+rows.length+' 个文件；按哈希合并多房间引用。';
+  $('room-files-page').textContent='第 '+(roomPage+1)+' 页';$('room-files-prev').disabled=roomPage===0;$('room-files-next').disabled=!roomNext;
+}
+function loadMirrorView(){const view=$('panel').dataset.mirrorView;return view==='resources'?loadCacheFiles():view==='temporary'?loadRoomFiles():view==='coverage'?loadSourceFiles(0):Promise.resolve();}
+$('cache-files-filter').onsubmit=event=>{event.preventDefault();cachePage=0;cacheCursors=[null];void loadCacheFiles().catch(showError);};
+$('cache-files-prev').onclick=()=>{if(cachePage){cachePage--;void loadCacheFiles().catch(showError);}};
+$('cache-files-next').onclick=()=>{if(cacheNext){cacheCursors[++cachePage]=cacheNext;void loadCacheFiles().catch(showError);}};
+$('room-files-filter').onsubmit=event=>{event.preventDefault();roomPage=0;roomCursors=[null];void loadRoomFiles().catch(showError);};
+$('room-files-prev').onclick=()=>{if(roomPage){roomPage--;void loadRoomFiles().catch(showError);}};
+$('room-files-next').onclick=()=>{if(roomNext){roomCursors[++roomPage]=roomNext;void loadRoomFiles().catch(showError);}};
 function sourceSelect(values,value){const node=sourceElement('select');for(const [key,title] of values){const option=sourceElement('option',title);option.value=key;node.append(option);}node.value=value;return node;}
 function addSourceProvider(value){
   const row=sourceElement('div');row.className='source-provider';row.dataset.id=value.id;
@@ -89,7 +154,9 @@ function renderSourceStatistics(data){
   const filter=$('mirror-source-filter'),selection=filter.value,options=[sourceElement('option','全部来源')];options[0].value='';
   for(const source of providers){const option=sourceElement('option',source.name);option.value=source.id;options.push(option);}filter.replaceChildren(...options);filter.value=selection;
   const status=data.automatic_sources||{};
-  $('mirror-source-notice').textContent=(status.generated_at?'最近扫描 '+new Date(status.generated_at*1000).toLocaleString('zh-CN')+' · 覆盖 '+number(status.matched)+' 个文件 · 待核验 '+number(status.remaining):'内置来源已就绪；等待完整资源清单，后台将分批核验并生成映射。')+(status.last_error?' · 部分来源暂不可用，将自动重试。':'');
+  const sourceNotice=(status.generated_at?'最近扫描 '+new Date(status.generated_at*1000).toLocaleString('zh-CN')+' · 覆盖 '+number(status.matched)+' 个文件 · 待核验 '+number(status.remaining):'内置来源已就绪；等待完整资源清单，后台将分批核验并生成映射。')+(status.last_error?' · 部分来源暂不可用，将自动重试。':'');
+  $('mirror-source-notice').textContent=sourceNotice;
+  $('mirror-source-notice-settings').textContent=sourceNotice;
   $('mirror-source-scan').disabled=!data.running||data.settings.auto_sources===false;
   $('mirror-source-preview').disabled=!data.running;
 }
@@ -118,6 +185,7 @@ function qualityTime(value){return value?new Date(value*1000).toLocaleString('zh
 function qualityButton(text,handler){const button=sourceElement('button',text);button.type='button';button.className='secondary';button.onclick=async()=>{button.disabled=true;try{await handler();}catch(error){showError(error);}finally{button.disabled=false;}};return button;}
 async function queueQuality(source){renderMirror(await api('v1/admin/mirror',{action:'quality_probe',...(source?{source}:{})}));message('已安排错峰采样；仍受单次间隔、每日预算和启用开关约束。');}
 async function qualityHistory(source){
+  $('quality-history-title').textContent=source.name+' · 最近 40 次采样';$('quality-history-panel').hidden=false;
   const data=await api('v1/admin/mirror',{action:'quality_history',source:source.id});
   $('quality-history-title').textContent=source.name+' · 最近 40 次采样';$('quality-history-panel').hidden=false;
   $('quality-history').replaceChildren(...(data.samples||[]).map(sample=>{const row=sourceElement('tr');for(const value of [qualityTime(sample.at),{ok:'成功',missing:'文件未覆盖',error:'连接或传输失败'}[sample.outcome]||sample.outcome,qualitySpeed(sample.outcome==='ok'?sample.speed:null),sample.ttfb_ms==null?'—':sample.ttfb_ms.toFixed(0)+' ms',(sample.bytes/1024).toFixed(0)+' KiB'])row.append(sourceElement('td',value));return row;}));

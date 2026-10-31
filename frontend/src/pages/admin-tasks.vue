@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import SiteNav from '../SiteNav.vue';
+import AdminNav from '../AdminNav.vue';
 import AdminAccess from '../AdminAccess.vue';
 defineProps<{seed:Record<string,string>;views:any}>();
 </script>
@@ -7,7 +8,7 @@ defineProps<{seed:Record<string,string>;views:any}>();
 <template>
 <SiteNav />
 <main class="admin-shell">
-<aside class="admin-sidebar"><span class="eyebrow">工作区</span><a href="/admin">运行概览</a><a href="/admin/traffic">访问统计</a><a href="/admin/nodes">服务节点</a><a href="/admin/settings">翻译设置</a><a class="active" aria-current="page" href="/admin/tasks">翻译任务</a><a href="/admin/usage">用量与费用</a><a href="/admin/mail">邮件通知</a><a href="/admin/clients">接入申请</a><a href="/admin/feedback">译文反馈</a><div class="sidebar-bottom">Buggcraft</div></aside>
+<AdminNav />
 <div class="admin-content">
 <header class="admin-header"><div><div class="eyebrow">PLATFORM MANAGEMENT</div><h1 id="page-title">翻译任务</h1><p class="muted">查看任务进度、处理结果与自动重试计划。</p></div><button id="logout" type="button" class="secondary hidden">退出管理</button></header>
 <section id="admin-access" :data-mode="seed.authMode" class="admin-access-host"><AdminAccess v-if="views.access.options" :options="views.access.options" :visible="views.access.visible" /></section><p id="message" class="admin-message" role="status" aria-live="polite"></p>

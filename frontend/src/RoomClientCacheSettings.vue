@@ -4,7 +4,7 @@
   <div class="admin-card">
     <p>正常可下载的文件直接使用公开来源。源站只对无法获取或持续过慢的文件请求房主补传，不上传整个整合包。下载公开，无需账号认证；请勿共享敏感或不希望公开的文件。</p>
     <p class="muted small">玩家无需管理缓存或关注清理时间。启动器只说明临时加速与通常 8 小时保留，不展示上传客户端、到期提醒或清理倒计时；到期后自动重新选择正常来源，仍有实际缺失时再按需缓存。</p>
-    <p id="room-cache-state" role="status" class="muted small"></p>
+
     <div class="mirror-settings-grid">
       <label class="full"><span><input id="room-cache-enabled" type="checkbox"> 启用房间客户端文件兜底</span></label>
       <label>每次缓存需求保留时间（小时）<input id="room-cache-ttl-hours" type="number" min="1" max="32" required><small>默认 8 小时，最多 32 小时；跨房间共用一份文件，全部需求到期才清理，轮询不会续期。</small></label>
@@ -17,8 +17,6 @@
     </div>
     <p class="muted small">此处保留时间只适用于房间客户端的模组、资源包与光影。游戏核心、Java、依赖库和加载器沿用各自策略。未知来源先直下，请求计划时不等待测速；已有下载不因后续测速变化而中断。</p>
   </div>
-  <div id="room-cache-metrics" class="metrics"></div>
-  <div class="admin-card"><h3>最近文件决策</h3><div class="table-scroll"><table><thead><tr><th>文件</th><th>大小</th><th>处理原因</th><th>更新时间</th></tr></thead><tbody id="room-cache-files"></tbody></table></div><p class="muted small">只接收节点授权且清单匹配的文件；关闭共享后不再签发新授权，已签授权最多保留 5 分钟。</p></div>
-  <div class="admin-card"><h3>公开来源观测</h3><div class="table-scroll"><table><thead><tr><th>来源</th><th>采样速度</th><th>连续慢速 / 样本</th><th>采样时间</th></tr></thead><tbody id="room-cache-sources"></tbody></table></div><p class="muted small">源站网络观测不代表所有玩家速度。Modrinth、MCIM 不参与自动采样和房间直下候选。</p></div>
+  <p><a href="/admin/mirror/temporary">查看临时文件、状态与空间占用 →</a></p>
 </section>
 </template>

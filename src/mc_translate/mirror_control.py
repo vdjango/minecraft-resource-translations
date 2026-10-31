@@ -51,9 +51,13 @@ class MirrorControl:
             if not isinstance(data, dict):
                 raise ValueError('expected a JSON object')
             if 'action' in data:
-                if data['action'] not in ('inventory', 'prefetch', 'cancel', 'refresh', 'source_scan', 'source_files', 'source_preview', 'source_cleanup', 'quality_probe', 'quality_history'):
+                if data['action'] not in ('inventory', 'prefetch', 'cancel', 'refresh', 'source_scan', 'source_files', 'source_preview', 'source_cleanup', 'quality_probe', 'quality_history', 'cache_files', 'room_files'):
                     raise ValueError('invalid mirror action')
                 arguments = dict(action=data['action'])
+                if data['action'] in ('cache_files', 'room_files'):
+                    from .mirror_observation import page_arguments
+                    page_arguments(data)
+                    arguments.update({key: data[key] for key in ('query', 'category', 'cursor') if key in data})
                 if data['action'] in ('quality_probe', 'quality_history'):
                     source = str(data.get('source', ''))
                     if len(source) > 64:
