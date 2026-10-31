@@ -5,6 +5,7 @@ production credentials or external sources are used.
 """
 import json
 import mimetypes
+import os
 import sys
 import threading
 import time
@@ -21,8 +22,10 @@ from mc_translate.management import Settings
 from mc_translate.mirror import validate_settings
 from browser_regression import Handler as CatalogueHandler
 
-WORKSPACE=Path(__file__).resolve().parents[2]
-WEB=WORKSPACE/'minecraft-translation-platform/src/mc_translate/web'
+REPOSITORY=Path(__file__).resolve().parents[1]
+WORKSPACE=REPOSITORY.parent.parent if REPOSITORY.parent.name=='.worktrees' else REPOSITORY.parent
+WEB=REPOSITORY/'src/mc_translate/web'
+NODE_REPOSITORY=Path(os.environ.get('BUGGCRAFT_NODE_REPOSITORY',WORKSPACE/'minecraft-tunnel-native'))
 SETTINGS=validate_settings({})
 MIRROR=dict(running=True, settings=SETTINGS, cached_files=320, cached_bytes=12345678,
             disk_free=50*1024**3, root='/fixture/cache',active_downloads=0,job=dict(state='idle'),
@@ -46,6 +49,7 @@ class PlatformHandler(CatalogueHandler):
         if path in files:
             time.sleep(.25)
             return self.send((WEB/files[path]).read_bytes().replace(b'{{AUTH_MODE}}',b'login'), 'text/html; charset=utf-8')
+        if path=='/docs':time.sleep(.4)
         return super().do_GET()
 
     def do_POST(self):
@@ -114,7 +118,8 @@ def main():
             assert not page.locator('#settings-downloads').is_visible()
             page.locator('#quality-probe-all').click()
             page.wait_for_function("document.querySelector('#message').textContent.includes('错峰')")
-            page.screenshot(path=str(WEB.parents[3]/'docs/source-quality-admin.png'),full_page=True)
+            page.evaluate('scrollTo(0,0)')
+            page.screenshot(path=str(WEB.parents[2]/'docs/source-quality-admin.png'),full_page=True)
             page.evaluate('window.navigationSentinel=42')
             page.locator('.admin-sidebar a[href="/admin/settings"]').click()
             page.wait_for_selector('#settings')
@@ -128,8 +133,8 @@ def main():
             assert not errors, errors
             print('PASS platform: visible navigation feedback, retained document, back/forward, independent admin, pricing, mobile')
             for name,root,start,target in [
-                ('official/download',WORKSPACE/'minecraft-tunnel-native/site','/','/download'),
-                ('node portal',WORKSPACE/'minecraft-tunnel-native/web/tunnel/web','/','/network'),
+                ('official/download',NODE_REPOSITORY/'site','/','/download'),
+                ('node portal',NODE_REPOSITORY/'web/tunnel/web','/','/network'),
             ]:
                 if not root.exists():continue
                 server,origin=serve(StaticHandler,root.resolve());servers.append(server)

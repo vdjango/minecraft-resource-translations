@@ -75,7 +75,7 @@
   .loading-value{display:inline-block;min-width:100px;min-height:26px;border-radius:6px;color:transparent!important;background:linear-gradient(105deg,#a18af808 30%,#a18af825 50%,#a18af808 70%);background-size:220% 100%;animation:site-shimmer 1.6s linear infinite}
   @keyframes site-shimmer{to{background-position:-220% 0}}@keyframes site-progress{50%{transform:scaleX(.9)}}@keyframes site-pulse{50%{opacity:.35}}
   @media(max-width:650px){.site-skeleton-layout{grid-template-columns:1fr}.site-skeleton{height:120px}#site-navigation-overlay{inset:64px 0 0}}
-  @media(prefers-reduced-motion:reduce){#site-load-bar,.site-skeleton,.site-load-dot,[aria-busy=true]:empty{animation:none!important;transition:none!important}}
+  @media(prefers-reduced-motion:reduce){#site-load-bar,.site-skeleton,.site-load-dot,.loading-value,[aria-busy=true]:empty{animation:none!important;transition:none!important}}
   `;
   document.head.append(style);
   let overlay, bar, active, sequence = 0, booted = false, navigationStarted = false, pendingCount = 0;
@@ -99,7 +99,8 @@
     const firstBody=new MutationObserver(()=>{if(document.body){firstBody.disconnect();initial();}});
     firstBody.observe(root,{childList:true});
   }
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initial,{once:true}); else initial();
+  const documentReady=()=>{initial();if(!document.querySelector('script[type=module][src*="vue-page-"]')){booted=true;hide();}};
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',documentReady,{once:true}); else documentReady();
   // A failed JS bundle cannot permanently conceal usable server-rendered content.
   setTimeout(() => { if(!navigationStarted)hide(); }, 8000);
   window.addEventListener('buggcraft:page-ready',()=>{booted=true;ensure();if(!navigationStarted){if(pendingCount>0)show('正在读取数据…',false);else hide();}});

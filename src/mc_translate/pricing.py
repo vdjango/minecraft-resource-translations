@@ -60,7 +60,8 @@ def calculate(usage, model, overrides=None):
         return result
     # Standard requests only. A supplier that omits cache details yields a
     # clearly labelled reference estimate using ordinary input tokens.
-    estimated = 'cached_tokens' not in details or (written > 0 and not splits)
+    estimated = ('cached_tokens' not in details or (written > 0 and not splits)
+                 or ('cache_write_30m' in price and 'cache_write_tokens' not in details))
     long = price.get('basis') == 'official' and price.get('model') in ('gpt-6.1-sol', 'gpt-6-sol') and incoming > 272000
     im, om = (2, 1.5) if long else (1, 1)
     cost = ((incoming-cached-written)*price['input'] + cached*price['cached_input']

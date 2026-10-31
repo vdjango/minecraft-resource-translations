@@ -44,6 +44,9 @@ def render():
         body = re.sub(r'{{(?!AUTH_MODE|AUTH_TITLE).*?}}', '—', body)
         # Vue's v-pre is harmless in the server shell and protects code examples.
         head = original.split('<body', 1)[0]
+        if name in ('admin-mirror', 'admin-model'):
+            title = '镜像源管理' if name=='admin-mirror' else '翻译设置'
+            head = re.sub(r'<title>.*?</title>', '<title>'+title+' · Buggcraft</title>', head)
         for css in ('mirror.css', 'platform.css', *(('network.css',) if name == 'developers' else ())):
             if '/assets/' + css not in head and '"assets/' + css not in head:
                 head = head.replace('</head>', f'<link rel="stylesheet" href="/assets/{css}"></head>')

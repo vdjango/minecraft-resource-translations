@@ -11,7 +11,7 @@ LINKS = json.loads((ROOT/'frontend/navigation.json').read_text(encoding='utf-8')
 def navigation(name):
     path = '/admin' if name.startswith('admin') else '/' if name in ('index', 'project') else '/'+name
     anchors = ''.join('<a href="'+escape(link['href'])+'"'+(' class="nav-active" aria-current="page"' if path==link['href'] else '')+'>'+escape(link['label'])+'</a>' for link in LINKS)
-    return ('<nav class="site-nav" aria-label="主导航"><a class="brand" href="/"><span class="mark">B</span><span class="brand-type"><strong>BUGGCRAFT</strong><small>RESOURCES &amp; TRANSLATIONS</small></span></a><div class="nav-links site-desktop-links">'+anchors+'</div><div class="site-nav-tools"><details class="site-mobile-menu"><summary aria-label="打开导航菜单">菜单 ☰</summary><div>'+anchors+'</div></details></div></nav>')
+    return ('<nav class="site-nav" aria-label="主导航"><a class="brand" href="/mirror"><span class="mark">B</span><span class="brand-type"><strong>BUGGCRAFT</strong><small>RESOURCE MIRROR &amp; TRANSLATIONS</small></span></a><div class="nav-links site-desktop-links">'+anchors+'</div><div class="site-nav-tools"><details class="site-mobile-menu"><summary aria-label="打开导航菜单">菜单 ☰</summary><div>'+anchors+'</div></details></div></nav>')
 
 
 def sync_navigation():
