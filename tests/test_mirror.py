@@ -24,7 +24,9 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.config = Config(database=str(self.root/'translations.sqlite'), mirror_root=str(self.root/'mirror'))
-        write_json(settings_path(self.config), validate_settings({'policies': {
+        write_json(settings_path(self.config), validate_settings({
+            'quota_gib': 2, 'reserve_gib': 10, 'auto_sources': False,
+            'auto_refresh': False, 'quality_enabled': False, 'policies': {
             **POLICIES, 'libraries': 'cache', 'assets': 'cache', 'java': 'cache'}}))
         self.payload = b'validated game resource\n' * 100
         self.calls = 0
