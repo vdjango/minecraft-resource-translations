@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from mc_translate.config import Config
 from mc_translate.mirror import create_mirror, settings_path, validate_settings
+from mc_translate.room_cache import keys
 from mc_translate.mirror_catalog import write_json
 
 SECRET = 'room-origin-integration-secret-0123456789'
@@ -81,6 +82,23 @@ class RoomCacheCase(unittest.IsolatedAsyncioTestCase):
         response = await self.client.put(self.url(), data=self.payload if payload is None else payload,
                                          headers=headers or self.auth())
         return response
+
+    async def test_node_invitation_http_claim_is_one_use(self):
+        from mc_translate.room_node_access import NodeAccess
+        registry = NodeAccess(self.config.mirror_root)
+        invitation = registry.invite('https://origin.example.org', '测试节点')
+        encoded = invitation.split('.', 1)[1]
+        ticket = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))['ticket']
+        payload = {'ticket': ticket, 'node_id': 'node_1'}
+        response = await self.client.post('/room-cache/nodes/claim', json=payload)
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        credentials = await response.json()
+        self.assertEqual(keys(self.config.mirror_root)[credentials['issuer']], credentials['secret'])
+        replay = await self.client.post('/room-cache/nodes/claim', json=payload)
+        self.assertEqual(replay.status, 403)
+        malformed = await self.client.post('/room-cache/nodes/claim', json=[])
+        self.assertEqual(malformed.status, 400)
 
     async def test_metadata_first_and_public_download_has_no_identity_gate(self):
         result = await self.plan()

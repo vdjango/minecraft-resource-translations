@@ -92,6 +92,28 @@ class MirrorControl:
             status['selection'] = inventory_selection(status['inventory'], status['settings']['policies'])
         return web.json_response(status)
 
+    async def room_nodes(self, request):
+        self.api.require_admin(request)
+        from .room_node_access import NodeAccess
+        registry = NodeAccess(self.config.mirror_root)
+        invitation = None
+        if request.method == 'POST':
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise web.HTTPBadRequest(text='Invalid node operation')
+            if data.get('action') == 'invite':
+                invitation = await asyncio.to_thread(registry.invite, read_settings(self.config)['public_url'], data.get('name', ''))
+            elif data.get('action') == 'revoke':
+                await asyncio.to_thread(registry.revoke, data.get('issuer'))
+            else:
+                raise ValueError('未知节点接入操作。')
+        from .room_cache import keys
+        nodes = await asyncio.to_thread(registry.list)
+        known = {item['issuer'] for item in nodes}
+        nodes += [dict(issuer=issuer, name=issuer, state='connected', enabled=True, legacy=True)
+                  for issuer in keys(self.config.mirror_root) if issuer not in known]
+        return web.json_response(dict(nodes=nodes, invitation=invitation), headers={'Cache-Control': 'no-store'})
+
     async def status(self, request):
         result = await self.call()
         fields = ('running', 'cached_bytes', 'cached_files', 'active_downloads', 'exclusions', 'policies')

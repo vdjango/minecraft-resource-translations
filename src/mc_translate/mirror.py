@@ -139,9 +139,9 @@ def upstreams(path):
         return []
     if path.startswith('/java/v1/'):
         return upstreams(path[5:])
-    if re.fullmatch(r'/mods/modrinth/data/[A-Za-z0-9_-]+/versions/[A-Za-z0-9_-]+/[A-Za-z0-9._ +@-]+\.jar', path):
+    if re.fullmatch(r'/mods/modrinth/data/[A-Za-z0-9_-]+/versions/[A-Za-z0-9_-]+/[A-Za-z0-9._ +@-]+\.(?:jar|zip|mrpack|litemod)', path):
         return ['https://cdn.modrinth.com' + quote(path[len('/mods/modrinth'):], safe='/@+')]
-    if re.fullmatch(r'/mods/curseforge/files/[0-9]+/[0-9]+/[A-Za-z0-9._ +@-]+\.jar', path):
+    if re.fullmatch(r'/mods/curseforge/files/[0-9]+/[0-9]+/[A-Za-z0-9._ +@-]+\.(?:jar|zip|mrpack|litemod)', path):
         return ['https://edge.forgecdn.net' + quote(path[len('/mods/curseforge'):], safe='/@+')]
     if path in ('/mc/game/version_manifest.json', '/mc/game/version_manifest_v2.json'):
         return [MANIFEST.replace('version_manifest_v2.json', path.rsplit('/', 1)[1])]
@@ -565,16 +565,17 @@ class Mirror:
 
     async def resource(self, request):
         settings = read_settings(self.config)
+        own_origin_only = request.headers.get('X-Buggcraft-Origin-Only') == '1'
         if request.query_string:
             raise web.HTTPBadRequest(text='Queries are not supported')
         direct = request.path.startswith('/_mirror_node/')
         path = request.path[len('/_mirror_node'):] if direct else request.path
         urls = upstreams(path)
-        mapped_targets = source_targets(settings,path,'redirect')
+        mapped_targets = [] if own_origin_only else source_targets(settings,path,'redirect')
         if not urls and not mapped_targets:
             raise web.HTTPNotFound()
         category = 'java' if path.startswith('/java/') else await self.category(urls[0]) if urls else 'libraries'
-        mode = settings['policies'][category]
+        mode = 'cache' if own_origin_only and settings['enabled'] else settings['policies'][category]
         mapped_targets = self.quality.ranked(path, mapped_targets)
         adaptive = bool(urls and self.quality.needs_cache(path, mapped_targets))
         if adaptive and mode == 'backup' and request.method == 'GET':
@@ -592,6 +593,9 @@ class Mirror:
                 raise web.HTTPServiceUnavailable(headers={'Retry-After':'30'})
             return await self.fallback(settings,path,urls[0],category,'mapped_source_unavailable',direct)
         if not settings['enabled'] or mode == 'disabled':
+            if own_origin_only:
+                raise web.HTTPServiceUnavailable(text='Buggcraft 源站未启用，无法提供此文件。',
+                                                 headers={'Retry-After':'30'})
             return self.redirect(urls[0], category, 'local_disabled')
         if mode == 'cache':
             known = await self.cached(urls[0])
@@ -599,9 +603,12 @@ class Mirror:
             planned = known['size'] if known else expected['size'] if expected and expected['size'] is not None else 1
             reason = await self.egress.reason(requested_bytes(request, planned), settings, sum(self.serving.values()))
             if reason:
+                if own_origin_only:
+                    raise web.HTTPServiceUnavailable(text='Buggcraft 源站当前容量或流量不足。',
+                                                     headers={'Retry-After':'30'})
                 return await self.fallback(settings, path, urls[0], category, reason, direct)
         if mode == 'cache' and not direct:
-            target = self.select_node(settings, category)
+            target = None if own_origin_only else self.select_node(settings, category)
             if target:
                 return self.redirect(target+'/_mirror_node'+quote(path, safe='/@+'), category, 'weighted_node', 'node')
         item, fallback = None, False
@@ -621,6 +628,9 @@ class Mirror:
             try:
                 item = await self.ensure(urls[0])
             except (web.HTTPNotFound, web.HTTPInsufficientStorage, web.HTTPServiceUnavailable, web.HTTPBadGateway, web.HTTPRequestEntityTooLarge, OSError) as exc:
+                if own_origin_only:
+                    raise web.HTTPServiceUnavailable(text='Buggcraft 源站暂时无法取得文件，不会重定向到第三方来源。',
+                                                     headers={'Retry-After':'30'}) from exc
                 return await self.fallback(settings, path, urls[0], category, 'local_'+str(getattr(exc, 'status', 'io')), direct)
         immutable = bool(re.search(r'/[a-f0-9]{40}(?:/|$)', urls[0]))
         # Pin under the same lock used by eviction, rechecking after any download.
@@ -633,6 +643,9 @@ class Mirror:
             if not reason:
                 self.serving[item['object']] = self.serving.get(item['object'], 0) + 1
         if reason:
+            if own_origin_only:
+                raise web.HTTPServiceUnavailable(text='Buggcraft 源站当前无法提供文件。',
+                                                 headers={'Retry-After':'30'})
             return await self.fallback(settings, path, urls[0], category, reason, direct)
         response = PinnedFileResponse(self.root / 'objects' / item['object'][:2] / item['object'], headers={
             'Cache-Control': 'no-store' if fallback else 'public, max-age=31536000, immutable' if immutable else 'public, max-age=300',
@@ -870,6 +883,17 @@ async def create_mirror(config):
     mirror = await Mirror(config).open()
     app = web.Application(middlewares=[mirror_boundary], client_max_size=8192)
     app['mirror'] = mirror
+    async def claim_node(request):
+        from .room_node_access import NodeAccess
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise web.HTTPBadRequest(text='Invalid node invitation')
+        try:
+            credentials = await asyncio.to_thread(NodeAccess(mirror.root).claim, data.get('ticket'), data.get('node_id'))
+        except ValueError as exc:
+            raise web.HTTPForbidden(text=str(exc)) from None
+        return web.json_response(dict(protocol='room-content-cache-v1', **credentials), headers={'Cache-Control': 'no-store'})
+    app.router.add_post('/room-cache/nodes/claim', claim_node)
     app.router.add_get('/mirror-api/status', mirror.public_status)
     app.router.add_get('/_internal/control', mirror.control)
     app.router.add_post('/_internal/control', mirror.control)

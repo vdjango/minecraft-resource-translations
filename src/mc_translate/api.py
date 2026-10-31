@@ -1687,6 +1687,8 @@ async def create_app(
     app.router.add_post('/v1/setup/finish', installation.finish)
     app.router.add_get('/v1/admin/mirror', mirror_control.admin)
     app.router.add_post('/v1/admin/mirror', mirror_control.admin)
+    app.router.add_get('/v1/admin/room-cache/nodes', mirror_control.room_nodes)
+    app.router.add_post('/v1/admin/room-cache/nodes', mirror_control.room_nodes)
     app.router.add_get('/mirror-api/status', mirror_control.status)
     app.router.add_get("/v1/capabilities", api.capabilities)
     app.router.add_post("/v1/sessions/anonymous", api.session)

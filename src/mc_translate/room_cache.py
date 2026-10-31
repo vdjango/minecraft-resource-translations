@@ -46,17 +46,21 @@ def validate_settings(settings):
             raise ValueError('invalid ' + key)
 
 
-def keys():
+def keys(root=None):
     try:
         result = json.loads(os.environ.get('TRANSLATION_ROOM_CACHE_KEYS', '{}'))
     except ValueError:
-        return {}
+        result = {}
     if not isinstance(result, dict):
-        return {}
+        result = {}
     secret = os.environ.get('TRANSLATION_ROOM_CACHE_SECRET', '')
     if secret:
         result = {**result, 'default': secret}
-    return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str) and len(v) >= 32}
+    result = {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str) and len(v) >= 32}
+    if root is not None:
+        from .room_node_access import NodeAccess
+        result = NodeAccess(root).apply(result)
+    return result
 
 
 def authorize(request, *, write=False):
@@ -67,7 +71,8 @@ def authorize(request, *, write=False):
         body, signature = token.encode('ascii').split(b'.')
         raw = base64.b64decode(body + b'=' * (-len(body) % 4), altchars=b'-_', validate=True)
         claims = json.loads(raw)
-        secret = keys().get(claims['iss'], '')
+        mirror = getattr(request, 'app', {}).get('mirror')
+        secret = keys(mirror.root if mirror else None).get(claims['iss'], '')
         expected = base64.urlsafe_b64encode(hmac.digest(secret.encode(), body, 'sha256')).rstrip(b'=')
         now = time.time()
         if (not secret or not hmac.compare_digest(signature, expected) or claims['v'] != 1
@@ -405,7 +410,7 @@ class RoomCache:
 
     async def probe(self):
         settings = self.settings()
-        if not settings['room_cache_probe_enabled'] or not settings['room_cache_enabled'] or not keys():
+        if not settings['room_cache_probe_enabled'] or not settings['room_cache_enabled'] or not keys(self.mirror.root):
             return
         row = await self.one('SELECT * FROM sources WHERE checked<? ORDER BY checked LIMIT 1',
                              (time.time() - settings['room_cache_probe_hours'] * 3600,))
@@ -461,5 +466,5 @@ class RoomCache:
             recent = [dict(row) for row in await cursor.fetchall()]
         async with self.db.execute('SELECT host,speed,bad,samples,checked FROM sources ORDER BY host') as cursor:
             sources = [dict(row) for row in await cursor.fetchall()]
-        return dict(configured=bool(keys()), **dict(totals), uploads=len(self.uploading),
+        return dict(configured=bool(keys(self.mirror.root)), **dict(totals), uploads=len(self.uploading),
                     downloads=sum(self.serving.values()), recent=recent, sources=sources, reasons=REASONS)

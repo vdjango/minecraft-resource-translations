@@ -51,7 +51,7 @@ function renderMirror(data,fill=false){
   $('mirror-report').textContent=JSON.stringify(report?{...report,known_GiB:Number((report.known_bytes/1024**3).toFixed(2)),selected_local_GiB:data.selection?Number((data.selection.local_bytes/1024**3).toFixed(2)):undefined,job}:job,null,2);
   const busy=job.state==='running';$('mirror-inventory').disabled=!data.running||busy;$('mirror-sync').disabled=!data.running||busy;$('mirror-prefetch').disabled=!data.running||busy||!report?.complete;$('mirror-cancel').disabled=!busy;
 }
-async function loadMirror(){renderMirror(await api('v1/admin/mirror'));}
+async function loadMirror(){renderMirror(await api('v1/admin/mirror'));await loadRoomNodes();}
 $('mirror-refresh').onclick=()=>loadMirror().catch(showError);
 function mirrorSettings(){
   return {...roomCacheSettings(),quality_enabled:$('quality-enabled').checked,quality_adaptive_cache:$('quality-adaptive-cache').checked,...Object.fromEntries(['interval_hours','daily_mib','sample_kib','fast_kibps','slow_kibps'].map(key=>['quality_'+key,Number($('quality-'+key.replaceAll('_','-')).value)])),public_url:$('mirror-url').value.trim(),quota_gib:Number($('mirror-quota').value),reserve_gib:Number($('mirror-reserve').value),concurrency:Number($('mirror-concurrency').value),metadata_ttl:Number($('mirror-ttl').value),enabled:$('mirror-enabled').checked,policies:Object.fromEntries(mirrorCategories.map(key=>[key,$('mirror-policy-'+key).value])),eviction:$('mirror-eviction').value,protect_latest:Number($('mirror-protect').value),auto_refresh:$('mirror-auto-refresh').checked,refresh_minutes:Number($('mirror-refresh-minutes').value),node_weight:Number($('mirror-node-weight').value),monthly_egress_gib:Number($('mirror-monthly-egress').value),egress_threshold:Number($('mirror-egress-threshold').value),bandwidth_mbps:Number($('mirror-bandwidth').value),max_serving:Number($('mirror-max-serving').value),nodes:$('mirror-nodes').value.split('\n').map(line=>line.trim()).filter(Boolean).map(line=>{const parts=line.split(/\s+/);if(parts.length>3||parts[2]&&parts[2]!=='off')throw Error('节点每行应为：HTTPS 地址、权重，以及可选的 off。');return {url:parts[0],weight:Number(parts[1]||1),enabled:parts[2]!=='off'};}),auto_sources:$('mirror-auto-sources').checked,source_prefer_cn:$('mirror-source-prefer-cn').checked,source_cleanup:$('mirror-source-cleanup').checked,source_registries:readSourceProviders()};
@@ -60,6 +60,24 @@ $('mirror-settings').onsubmit=async event=>{event.preventDefault();const button=
 for(const key of mirrorCategories)$('mirror-policy-'+key).onchange=event=>{event.target.closest('label').dataset.mode=event.target.value;};
 for(const action of ['inventory','prefetch','cancel','refresh'])$(action==='refresh'?'mirror-sync':'mirror-'+action).onclick=async event=>{const button=event.currentTarget;button.disabled=true;try{renderMirror(await api('v1/admin/mirror',{action}));message(action==='cancel'?'后台同步任务已停止；正在提供服务的文件保留。':'后台任务已提交，可刷新查看进度。');}catch(e){showError(e);button.disabled=false;}};
 const mirrorPoll=setInterval(()=>{if(!$('panel').classList.contains('hidden'))void loadMirror().catch(showError);},15000);
+
+function renderRoomNodes(data){
+  const rows=(data.nodes||[]).map(node=>{
+    const tr=document.createElement('tr'),name=document.createElement('td'),state=document.createElement('td'),actions=document.createElement('td');
+    name.textContent=node.name;state.textContent=!node.enabled?'已撤销':({connected:'已接入',pending:'等待接入',expired:'邀请已过期'}[node.state]||'未知');
+    if(node.enabled){const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='撤销接入';button.onclick=async()=>{button.disabled=true;try{renderRoomNodes(await api('v1/admin/room-cache/nodes',{action:'revoke',issuer:node.issuer}));$('room-node-feedback').textContent='已撤销，此节点不能再签发有效上传授权；公开下载不受影响。';}catch(error){showError(error);button.disabled=false;}};actions.append(button);}
+    tr.append(name,state,actions);return tr;
+  });
+  $('room-node-list').replaceChildren(...rows);
+  if(!rows.length)$('room-node-feedback').textContent='尚未接入节点。生成邀请后，到节点后台粘贴即可。';
+}
+async function loadRoomNodes(){renderRoomNodes(await api('v1/admin/room-cache/nodes'));}
+$('room-node-refresh').onclick=()=>void loadRoomNodes().catch(showError);
+$('room-node-invite').onclick=async event=>{const button=event.currentTarget;button.disabled=true;try{
+  const data=await api('v1/admin/room-cache/nodes',{action:'invite',name:$('room-node-name').value.trim()});renderRoomNodes(data);
+  $('room-node-code').value=data.invitation;$('room-node-invitation').hidden=false;$('room-node-feedback').textContent='请在 10 分钟内将邀请粘贴到节点后台。';
+}catch(error){showError(error);}finally{button.disabled=false;}};
+$('room-node-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('room-node-code').value);$('room-node-feedback').textContent='邀请已复制。';}catch{$('room-node-code').select();$('room-node-feedback').textContent='请复制已选中的邀请内容。';}};
 
 let sourceOffset=0,sourceNext=null;
 function sourceElement(tag,text){const node=document.createElement(tag);if(text!=null)node.textContent=String(text);return node;}

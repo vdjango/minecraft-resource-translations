@@ -2,6 +2,13 @@
 <section id="settings-room-cache" role="tabpanel" aria-labelledby="tab-room-cache" class="admin-section">
   <div class="section-heading"><div><div class="section-caption">ROOM FILE ACCELERATION</div><h2>房间临时下载加速</h2></div><span class="badge">先传信息 · 按需缓存</span></div>
   <div class="admin-card">
+    <div class="section-heading"><div><h3>接入联机节点</h3><p class="muted small">生成邀请，复制到节点后台的“资源下载加速”，接入后立即生效，无需修改服务器文件或重启。</p></div><button id="room-node-refresh" type="button" class="secondary">刷新节点</button></div>
+    <div class="mirror-settings-grid"><label>节点名称<input id="room-node-name" maxlength="80" placeholder="例如：宿迁联机节点"></label><div><button id="room-node-invite" type="button" class="primary">生成接入邀请</button></div></div>
+    <div id="room-node-invitation" hidden><label>一次性邀请 · 10 分钟有效<textarea id="room-node-code" rows="3" readonly spellcheck="false"></textarea></label><button id="room-node-copy" type="button" class="secondary">复制邀请</button><p class="muted small">仅交给节点管理员；邀请只能使用一次，授权密钥自动保存，玩家无需配置。</p></div>
+    <p id="room-node-feedback" role="status" class="muted small"></p>
+    <div class="table-scroll"><table><thead><tr><th>节点</th><th>接入状态</th><th>管理</th></tr></thead><tbody id="room-node-list"></tbody></table></div>
+  </div>
+  <div class="admin-card">
     <p>正常可下载的文件直接使用公开来源。源站只对无法获取或持续过慢的文件请求房主补传，不上传整个整合包。下载公开，无需账号认证；请勿共享敏感或不希望公开的文件。</p>
     <p class="muted small">玩家无需管理缓存或关注清理时间。启动器只说明临时加速与通常 8 小时保留，不展示上传客户端、到期提醒或清理倒计时；到期后自动重新选择正常来源，仍有实际缺失时再按需缓存。</p>
     <p id="room-cache-state" role="status" class="muted small"></p>

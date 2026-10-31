@@ -60,6 +60,24 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         sha = hashlib.sha1(self.payload).hexdigest()
         return '/assets/' + sha[:2] + '/' + sha
 
+    async def test_pack_and_resource_zip_routes_use_origin_bytes(self):
+        routes = {
+            '/mods/modrinth/data/project/versions/release/pack.mrpack':
+                'https://cdn.modrinth.com/data/project/versions/release/pack.mrpack',
+            '/mods/modrinth/data/project/versions/release/resources.zip':
+                'https://cdn.modrinth.com/data/project/versions/release/resources.zip',
+            '/mods/curseforge/files/123/456/resources.zip':
+                'https://edge.forgecdn.net/files/123/456/resources.zip',
+        }
+        for path, upstream in routes.items():
+            with self.subTest(path=path):
+                self.assertEqual(upstreams(path), [upstream])
+                result = await self.client.get(path, headers={'X-Buggcraft-Origin-Only': '1'},
+                                               allow_redirects=False)
+                self.assertEqual(result.status, 200)
+                self.assertEqual(await result.read(), self.payload)
+        self.assertEqual(upstreams('/mods/modrinth/data/x/versions/y/../../private.zip'), [])
+
     def policies(self, **values):
         settings = read_settings(self.config)
         settings['policies'].update(values)
@@ -111,6 +129,21 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         for bad in ('/mods/https://evil.com/file.jar', '/mods/modrinth/data/a/versions/b/file.zip',
                     '/mods/curseforge/files/1/2/file.jar?url=https://evil.com'):
             self.assertIn((await self.client.get(bad)).status, (400, 404))
+
+    async def test_launcher_fallback_serves_bytes_or_fails_without_external_redirect(self):
+        path = '/mods/modrinth/data/abc123/versions/def456/example.jar'
+        headers = {'X-Buggcraft-Origin-Only': '1'}
+        response = await self.client.get(path, headers=headers, allow_redirects=False)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), self.payload)
+        self.assertNotIn('Location', response.headers)
+        self.response_status = 404
+        missing = await self.client.get('/mods/modrinth/data/abc123/versions/def456/missing.jar',
+                                        headers=headers, allow_redirects=False)
+        self.assertEqual(missing.status, 503)
+        self.assertNotIn('Location', missing.headers)
+        direct = await self.client.get(path, allow_redirects=False)
+        self.assertEqual(direct.status, 307)  # Legacy visitors keep the configured mirror policy.
 
     async def test_prefetch_skips_redirected_categories_and_honors_live_change(self):
         sha = hashlib.sha1(self.payload).hexdigest()
