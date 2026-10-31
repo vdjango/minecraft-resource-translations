@@ -3,7 +3,7 @@ import SiteNav from '../SiteNav.vue';
 import AdminAccess from '../AdminAccess.vue';
 import RoomClientCacheSettings from '../RoomClientCacheSettings.vue';
 import {onMounted, onUnmounted, ref} from 'vue';
-const settingsTabs=[['translation','翻译服务'],['downloads','下载策略'],['storage','存储与同步'],['distribution','节点与流量'],['sources','公开来源'],['quality','来源质量'],['room-cache','客户端兜底'],['cloudflare','域名与缓存']];
+const settingsTabs=[['downloads','下载策略'],['storage','存储与同步'],['distribution','节点与流量'],['sources','公开来源'],['quality','来源质量'],['room-cache','临时加速'],['cloudflare','域名与缓存']];
 const selected=ref('downloads');
 function restoreTab(){const key=location.hash.slice(1);selected.value=settingsTabs.some(tab=>tab[0]===key)?key:'downloads';}
 function selectTab(key:string){selected.value=key;history.replaceState(null,'','#'+key);}

@@ -63,6 +63,7 @@ export default defineConfig({
   build: {
     target: 'es2022', outDir: web, emptyOutDir: false, sourcemap: false,
     rollupOptions: {
+      preserveEntrySignatures: 'exports-only',
       input: Object.fromEntries(Object.keys(pages).map(name => ['page-' + name, 'page:' + name])),
       output: {entryFileNames:'vue-[name].js', chunkFileNames:'vue-runtime-[hash].js', assetFileNames:'vue-[name][extname]'},
     },

@@ -263,6 +263,28 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mirror.job_state['skipped'],1)
         self.assertEqual(self.calls,0)
 
+    async def test_quality_cache_decision_preserves_category_and_storage_limits(self):
+        path = self.asset()
+        target = 'https://source.example/slow-file.jar'
+        with patch('mc_translate.mirror.source_targets', return_value=[target]), \
+                patch.object(self.mirror.quality, 'needs_cache', return_value=True), \
+                patch.object(self.mirror, 'upstream_available', new=AsyncMock(return_value=True)):
+            # A slow-source hint does not turn an explicitly redirected class into storage.
+            self.policies(assets='redirect')
+            response = await self.client.get(path, allow_redirects=False)
+            self.assertEqual((response.status, response.headers['Location']), (307, target))
+            self.assertEqual(self.calls, 0)
+            self.policies(assets='cache')
+            response = await self.client.get(path, allow_redirects=False)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.read(), self.payload)
+            self.assertEqual(self.calls, 1)
+            # A quality decision still cannot bypass the normal capacity check.
+            with patch.object(self.mirror, 'ensure', new=AsyncMock(side_effect=web.HTTPInsufficientStorage())):
+                response = await self.client.get(path, allow_redirects=False)
+                self.assertEqual(response.status, 307)
+                self.assertEqual(response.headers['X-Mirror-Reason'], 'local_507')
+
     async def test_source_validation_exact_and_longest_prefix_mapping(self):
         rows=[dict(prefix='/maven/org/',target='https://repo.example.com/org/',mode='redirect',enabled=True),
               dict(prefix='/maven/org/ex/',target='https://repo2.example.com/ex/',mode='redirect',enabled=True),
