@@ -40,7 +40,7 @@ def render(only=None):
         body = re.sub(r'<a v-for="node in nodes".*?</a>', '', body, flags=re.S)
         body = re.sub(r'<button v-for="tab in settingsTabs".*?</button>',
                       ''.join(f'<a href="#{key}">{label}</a>' for key, label in
-                              ([('downloads','下载策略'),('storage','存储与同步'),('distribution','节点与流量'),('sources','公开来源'),('quality','来源质量'),('room-cache','客户端兜底'),('cloudflare','域名与缓存')] if name=='admin-mirror' else [('translation','翻译服务')])), body, flags=re.S)
+                              ([('downloads','下载策略'),('storage','存储与同步'),('distribution','节点与流量'),('sources','公开来源'),('quality','来源质量'),('room-cache','临时加速'),('cloudflare','域名与缓存')] if name=='admin-mirror' else [('translation','翻译服务')])), body, flags=re.S)
         body = re.sub(r' v-show="[^"]*"', '', body)
         body = re.sub(r' @click="[^"]*"', '', body)
         body = re.sub(r' v-if="[^"]*"', '', body)

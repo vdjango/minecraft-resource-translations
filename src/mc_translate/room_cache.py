@@ -252,6 +252,7 @@ class RoomCache:
                     previous = await self.one('SELECT size,sha1 FROM files WHERE digest=? LIMIT 1', (file['sha256'],))
                     if previous and (previous['size'] != file['size'] or previous['sha1'] and file.get('sha1') and previous['sha1'] != file['sha1']):
                         raise web.HTTPBadRequest(text='同一文件哈希的大小或校验信息不一致。')
+                for file in files:
                     await self.db.execute('''INSERT INTO files(scope,digest,path,size,sha1,urls,touched)
                         VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope,digest) DO UPDATE SET
                         urls=excluded.urls,touched=excluded.touched''',
