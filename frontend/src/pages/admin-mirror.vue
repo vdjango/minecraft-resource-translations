@@ -6,7 +6,7 @@ import MirrorOperations from '../MirrorOperations.vue';
 import RoomClientCacheSettings from '../RoomClientCacheSettings.vue';
 import {onMounted} from 'vue';
 defineProps<{seed:Record<string,string>;views:any}>();
-const settingsTabs=[['downloads','下载策略'],['storage','存储与调度'],['distribution','分发与流量'],['sources','来源管理'],['quality','质量采样'],['room-cache','客户端缓存策略'],['cloudflare','域名与 CDN']];
+const settingsTabs=[['downloads','下载策略'],['storage','存储与调度'],['cloud','云存储'],['distribution','分发与流量'],['sources','来源管理'],['quality','质量采样'],['room-cache','客户端缓存策略'],['cloudflare','域名与 CDN']];
 const legacy=location.pathname==='/admin/mirror'?location.hash.slice(1):'';
 if(legacy){const target=legacy==='quality'?'/admin/mirror/quality':settingsTabs.some(([key])=>key===legacy)?'/admin/mirror/settings/'+legacy:'/admin/mirror';history.replaceState(null,'',target);}
 const config=location.pathname.startsWith('/admin/mirror/settings');
@@ -38,6 +38,12 @@ onMounted(()=>{document.title=title+' · Buggcraft';window.dispatchEvent(new Cus
 <p class="muted small">默认每个来源约 6 小时，随机浮动 25%；全站每 2–5 分钟最多一项，单次 256 KiB、10 秒超时，每天最多 32 MiB。手动采样同样排队并受预算限制。</p><p class="muted small">至少 8 次有效观测、跨 3 天、含 3 次文件传输才评级：优 ≥98% 可用且达到快速参考；良 ≥90% 可用且高于慢速参考；其余为待优化。文件 404 单独记录，不算整站故障。停测超过两天显示“已过期”。</p>
 </div><a href="/admin/mirror/quality">查看来源质量与历史 →</a></div>
 <RoomClientCacheSettings v-show="selected==='room-cache'" />
+<section id="settings-cloud" v-show="selected==='cloud'" class="cloud-settings">
+  <div class="settings-panel-heading"><h2>云存储与分流</h2><p class="muted">本地镜像继续服务。先配置空间与类别路径，验证后再手动开启后台复制。</p></div>
+  <article class="admin-card"><div class="section-heading"><div><span class="section-caption">KODO PROFILES</span><h3>七牛云空间</h3></div><button id="cloud-add-profile" type="button" class="secondary">＋ 添加空间</button></div><p class="muted small">支持多个 Bucket。密钥只保存在服务器环境变量指定的私有 JSON 文件，后台不接收 AK/SK。已有云端文件的空间标识、Bucket 与下载域名不可直接改写；请新增空间后分批迁移。</p><div id="cloud-profiles" class="cloud-profile-list"></div></article>
+  <article class="admin-card"><div class="section-heading"><div><span class="section-caption">CATEGORY ROUTES</span><h3>按资源类别指定存储</h3></div><a href="/admin/mirror/resources">查看实际存储位置 →</a></div><p class="muted small">本地：维持现状；双副本：校验后保留本地；云端优先：校验后按需释放本地并跳转至七牛下载域名。镜像下载策略中的纯重定向仍不下载实体。客户端临时缓存遵守自身保留时间。</p><div class="table-scroll"><table class="resource-table"><thead><tr><th>资源</th><th>存储方式</th><th>空间</th><th>对象路径</th></tr></thead><tbody id="cloud-routes"></tbody></table></div></article>
+  <article class="admin-card"><div class="section-heading"><div><span class="section-caption">SAFETY</span><h3>上传保护</h3></div><a href="/admin/mirror/tasks">查看云端任务 →</a></div><div class="mirror-settings-grid"><label><span><input id="cloud-paused" type="checkbox" checked> 暂停云端新上传（默认开启）</span></label><label>私有下载链接有效时间 / 分钟<input id="cloud-signed-minutes" type="number" min="30" max="1440" required></label></div><p class="muted small">每个空间有独立的托管容量预算及每日上传预算。暂停仅阻止新上传，已核验的云端副本仍可用于下载；不会自动搬迁既有文件。</p><p id="cloud-config-state" role="status" class="muted small"></p></article>
+</section>
 <div class="settings-save-bar"><span class="muted small">配置保存后生效，正在下载的文件继续传输。</span><button type="submit">保存镜像设置</button></div></form>
 <section id="settings-cloudflare" role="tabpanel" aria-labelledby="tab-cloudflare" v-show="selected==='cloudflare'" class="admin-card mirror-guide"><div class="section-caption">CLOUDFLARE SETUP</div><h3>Cloudflare 与域名配置指南</h3><p>mirror.bugg.icu 已作为公开镜像入口。官网、下载站、节点、翻译与镜像共用三个缓存规则名额；按下面的顺序配置，不需要新增第四条。mirror2.bugg.icu 使用同一套规则，但其回源健康须独立检查。</p>
 <details open><summary>DNS 与 HTTPS</summary><p>已生效的 DNS、Cloudflare Tunnel、端口和 SSL/TLS 配置保持原样。新增站点时使用橙云代理及 Full (strict)，先验证健康检查和 Range 下载，再纳入分流；不要因为缓存规则改动重配联机节点或其他服务。</p><p>镜像网站与资源进程分路径转发：普通网页和后台走网页服务，哈希资源、游戏核心、加载器与 Maven 路径走镜像进程；房间临时文件单独走 /room-cache/，始终绕过边缘缓存。示例见 deploy/nginx-mirror.conf。</p></details>

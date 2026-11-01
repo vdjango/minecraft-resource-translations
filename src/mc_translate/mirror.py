@@ -28,6 +28,8 @@ from .mirror_source_management import SourceManagement
 from .mirror_quality import QUALITY_DEFAULTS, SourceQuality
 from .mirror_observation import MirrorObservation, room_files
 from .room_cache import RoomCache, DEFAULTS as ROOM_CACHE_DEFAULTS, validate_settings as validate_room_cache
+from .mirror_storage import LOCAL_ROUTES, StorageError, validate_cloud_settings
+from .mirror_cloud import MirrorCloud
 
 GIB = 1024 ** 3
 DEFAULTS = dict(enabled=True, public_url='https://mirror.bugg.icu', quota_gib=400,
@@ -35,7 +37,8 @@ DEFAULTS = dict(enabled=True, public_url='https://mirror.bugg.icu', quota_gib=40
                 auto_refresh=True, refresh_minutes=30, eviction='oldest_version',
                 protect_latest=2, nodes=[], node_weight=1, auto_sources=True, source_prefer_cn=True,
                 source_cleanup=False, source_registries=BUILTIN_SOURCES, **ROUTING_DEFAULTS, **QUALITY_DEFAULTS,
-                **ROOM_CACHE_DEFAULTS)
+                **ROOM_CACHE_DEFAULTS, qiniu_profiles=[], qiniu_routes=LOCAL_ROUTES,
+                qiniu_paused=True, qiniu_signed_url_minutes=240)
 
 
 class PinnedFileResponse(web.FileResponse):
@@ -64,7 +67,11 @@ def read_settings(config, *, effective=True):
         data = _settings_data(str(path), stat.st_mtime_ns, stat.st_size)
     except FileNotFoundError:
         data = {}
+    routes = data.get('qiniu_routes', {})
+    if not isinstance(routes, dict):
+        routes = {}
     return {**DEFAULTS, **data, 'policies': {**POLICIES, **data.get('policies', {})},
+            'qiniu_routes': {name: {**route, **routes.get(name, {})} for name, route in LOCAL_ROUTES.items()},
             'sources': effective_sources(config) if effective else data.get('sources', [])}
 
 
@@ -126,6 +133,9 @@ def validate_settings(data):
     if result['quality_slow_kibps'] >= result['quality_fast_kibps']:
         raise ValueError('slow speed must be below fast speed')
     validate_room_cache(result)
+    result['qiniu_routes'] = {name: {**route, **result['qiniu_routes'].get(name, {})}
+                              for name, route in LOCAL_ROUTES.items()}
+    validate_cloud_settings(result)
     return result
 
 
@@ -220,6 +230,7 @@ class Mirror:
         self.quality = SourceQuality(self)
         self.observation = MirrorObservation(self)
         self.room_cache = RoomCache(self, lambda: read_settings(self.config))
+        self.cloud = MirrorCloud(self, lambda: read_settings(self.config))
 
     async def open(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -236,7 +247,7 @@ class Mirror:
         await self.db.executescript('''
             CREATE TABLE IF NOT EXISTS cache(url TEXT PRIMARY KEY, object TEXT, size INTEGER, sha1 TEXT, checked INTEGER, fetched REAL, type TEXT);
             CREATE TABLE IF NOT EXISTS expected(url TEXT PRIMARY KEY, sha1 TEXT, size INTEGER, category TEXT);
-            CREATE TABLE IF NOT EXISTS objects(digest TEXT PRIMARY KEY, size INTEGER NOT NULL, accessed REAL NOT NULL DEFAULT 0, priority REAL NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS objects(digest TEXT PRIMARY KEY, size INTEGER NOT NULL, accessed REAL NOT NULL DEFAULT 0, priority REAL NOT NULL DEFAULT 0, local INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS totals(id INTEGER PRIMARY KEY CHECK(id=1), bytes INTEGER, files INTEGER);
             CREATE INDEX IF NOT EXISTS cache_object ON cache(object);
             CREATE TABLE IF NOT EXISTS priorities(url TEXT PRIMARY KEY, priority REAL NOT NULL);
@@ -244,9 +255,9 @@ class Mirror:
         ''')
         async with self.db.execute('PRAGMA table_info(objects)') as cursor:
             object_columns = {row['name'] for row in await cursor.fetchall()}
-        for name in ('accessed', 'priority'):
+        for name in ('accessed', 'priority', 'local'):
             if name not in object_columns:
-                await self.db.execute(f'ALTER TABLE objects ADD COLUMN {name} REAL NOT NULL DEFAULT 0')
+                await self.db.execute(f'ALTER TABLE objects ADD COLUMN {name} {"INTEGER NOT NULL DEFAULT 1" if name == "local" else "REAL NOT NULL DEFAULT 0"}')
         await self.db.execute('CREATE INDEX IF NOT EXISTS eviction_objects ON objects(priority,accessed)')
         await self.db.execute('CREATE INDEX IF NOT EXISTS eviction_access ON objects(accessed)')
         if not await self.one('SELECT id FROM totals WHERE id=1'):
@@ -270,11 +281,14 @@ class Mirror:
         # Interrupted partial files are never published; remove only our temp files.
         for file in (self.root / 'tmp').glob('*.part'):
             file.unlink(missing_ok=True)
+        await self.cloud.open()
         await self.room_cache.open()
+        self.cloud.start()
         self.scheduler = asyncio.create_task(self.refresh_loop())
         return self
 
     async def close(self):
+        await self.cloud.close()
         await self.room_cache.close()
         await self.quality.close()
         tasks = [t for t in [self.scheduler, self.job, self.source_job, *self.backups.values(), *self.probes.values(), *self.inflight.values()] if t]
@@ -310,6 +324,7 @@ class Mirror:
                     source_statistics=await self.sources.summary(),
                     source_quality=await self.quality.snapshot(),
                     room_client_cache=await self.room_cache.snapshot(),
+                    cloud_storage=await self.cloud.snapshot(),
                     operations=await self.observation.snapshot(),
                     egress=await self.egress.snapshot(settings),
                     accepting=not await self.egress.reason(1, settings, sum(self.serving.values())),
@@ -321,7 +336,8 @@ class Mirror:
 
     async def cached(self, url):
         item = await self.one('SELECT * FROM cache WHERE url=?', (url,))
-        if item and (self.root / 'objects' / item['object'][:2] / item['object']).is_file():
+        if item and ((self.root / 'objects' / item['object'][:2] / item['object']).is_file()
+                     or await self.cloud.download_url('mirror', item['object'])):
             return item
         return None
 
@@ -346,19 +362,26 @@ class Mirror:
         while needed > 0:
             clause = ' AND (' + order + ') > (' + ','.join('?' for _ in columns) + ')' if after else ''
             args = (protected, protected, admission, admission, *(after or ()))
-            async with self.db.execute('SELECT digest,size,priority,accessed FROM objects WHERE (? IS NULL OR priority<?) AND (? IS NULL OR priority<=?)'+clause+' ORDER BY '+order+' LIMIT 256', args) as cursor:
+            async with self.db.execute('SELECT digest,size,priority,accessed FROM objects WHERE local=1 AND (? IS NULL OR priority<?) AND (? IS NULL OR priority<=?)'+clause+' ORDER BY '+order+' LIMIT 256', args) as cursor:
                 candidates = await cursor.fetchall()
             if not candidates:
                 break
             after = tuple(candidates[-1][column] for column in columns)
             for item in candidates:
                 digest = item['digest']
-                if self.serving.get(digest):
+                if self.serving.get(digest) or self.cloud.active_digest == digest:
                     continue
                 file = self.root/'objects'/digest[:2]/digest
                 try:
                     await asyncio.to_thread(file.unlink, missing_ok=True)
                 except OSError:
+                    continue
+                if await self.cloud.location('mirror', digest):
+                    await self.db.execute('UPDATE objects SET local=0 WHERE digest=?', (digest,))
+                    await self.db.execute('UPDATE totals SET bytes=MAX(bytes-?,0) WHERE id=1', (item['size'],))
+                    needed -= item['size']
+                    if needed <= 0:
+                        break
                     continue
                 count = (await self.one('SELECT COUNT(*) n FROM cache WHERE object=?', (digest,)))['n']
                 await self.db.execute('DELETE FROM cache WHERE object=?', (digest,))
@@ -483,13 +506,21 @@ class Mirror:
                     if inserted.rowcount:
                         await self.db.execute('UPDATE totals SET bytes=bytes+? WHERE id=1', (written,))
                     else:
-                        await self.db.execute('UPDATE objects SET priority=MAX(priority,?) WHERE digest=?', (priority['priority'] if priority else 0, digest))
+                        previous = await self.one('SELECT local FROM objects WHERE digest=?', (digest,))
+                        if not previous['local']:
+                            await self.db.execute('UPDATE totals SET bytes=bytes+? WHERE id=1', (written,))
+                        await self.db.execute('UPDATE objects SET local=1,priority=MAX(priority,?) WHERE digest=?', (priority['priority'] if priority else 0, digest))
                     if not await self.one('SELECT url FROM cache WHERE url=?', (url,)):
                         await self.db.execute('UPDATE totals SET files=files+1 WHERE id=1')
                     await self.db.execute('INSERT OR REPLACE INTO cache VALUES(?,?,?,?,?,?,?)',
                                           (url, digest, written, h1.hexdigest(), int(bool(sha1)), time.time(), content_type))
                     await self.db.commit()
                 await self.remember_metadata(url, dest)
+                category = category_for(url, expected['category'] if expected else None)
+                try:
+                    await self.cloud.enqueue('mirror', digest, written, category)
+                except Exception:
+                    logging.exception('Cloud copy could not be queued; local file remains available')
                 return await self.cached(url)
         except (ClientError, asyncio.TimeoutError) as exc:
             if old:
@@ -618,6 +649,10 @@ class Mirror:
                 if own_origin_only:
                     raise web.HTTPServiceUnavailable(text='Buggcraft 源站当前容量或流量不足。',
                                                      headers={'Retry-After':'30'})
+                if known:
+                    cloud_url = await self.cloud.download_url('mirror', known['object'])
+                    if cloud_url:
+                        return self.redirect(cloud_url, category, reason, 'cloud')
                 return await self.fallback(settings, path, urls[0], category, reason, direct)
         if mode == 'cache' and not direct:
             target = None if own_origin_only else self.select_node(settings, category)
@@ -644,6 +679,14 @@ class Mirror:
                     raise web.HTTPServiceUnavailable(text='Buggcraft 源站暂时无法取得文件，不会重定向到第三方来源。',
                                                      headers={'Retry-After':'30'}) from exc
                 return await self.fallback(settings, path, urls[0], category, 'local_'+str(getattr(exc, 'status', 'io')), direct)
+        local_path = self.root / 'objects' / item['object'][:2] / item['object']
+        cloud_url = await self.cloud.download_url('mirror', item['object'])
+        if cloud_url and not own_origin_only and (settings['qiniu_routes'][category]['mode'] == 'cloud' or not local_path.is_file()):
+            return self.redirect(cloud_url, category, 'verified_cloud_copy', 'cloud')
+        if not local_path.is_file():
+            if own_origin_only:
+                raise web.HTTPServiceUnavailable(text='Buggcraft ???????????', headers={'Retry-After':'30'})
+            return await self.fallback(settings, path, urls[0], category, 'cloud_unavailable', direct)
         immutable = bool(re.search(r'/[a-f0-9]{40}(?:/|$)', urls[0]))
         # Pin under the same lock used by eviction, rechecking after any download.
         async with self.space_lock:
@@ -658,8 +701,10 @@ class Mirror:
             if own_origin_only:
                 raise web.HTTPServiceUnavailable(text='Buggcraft 源站当前无法提供文件。',
                                                  headers={'Retry-After':'30'})
+            if cloud_url:
+                return self.redirect(cloud_url, category, reason, 'cloud')
             return await self.fallback(settings, path, urls[0], category, reason, direct)
-        response = PinnedFileResponse(self.root / 'objects' / item['object'][:2] / item['object'], headers={
+        response = PinnedFileResponse(local_path, headers={
             'Cache-Control': 'no-store' if fallback else 'public, max-age=31536000, immutable' if immutable else 'public, max-age=300',
             'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Checksum-Sha1, X-Mirror-Verified',
             'Content-Type': item['type'], 'X-Checksum-Sha1': item['sha1'],
@@ -711,6 +756,25 @@ class Mirror:
                 except ValueError as exc:
                     raise web.HTTPBadRequest(text=str(exc)) from None
                 return web.json_response(result, headers={'Cache-Control': 'no-store'})
+            if action == 'cloud_migrate':
+                try:
+                    queued = await self.cloud.migrate(data['route'], data['limit'])
+                except (KeyError, ValueError) as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(dict(queued=queued, cloud_storage=await self.cloud.snapshot()), headers={'Cache-Control': 'no-store'})
+            if action == 'cloud_retry':
+                return web.json_response(dict(retried=await self.cloud.retry(data['job_id']), cloud_storage=await self.cloud.snapshot()), headers={'Cache-Control': 'no-store'})
+            if action in ('cloud_probe', 'cloud_test'):
+                try:
+                    storage = self.cloud.storage(data['profile'])
+                    result = await (storage.test() if action == 'cloud_test' else storage.probe())
+                    if result and action == 'cloud_probe':
+                        item = await self.one("SELECT object_key FROM object_locations WHERE profile=? AND state='ready' ORDER BY verified_at DESC LIMIT 1", (data['profile'],))
+                        if item:
+                            result = await self.cloud.check_download(data['profile'], item['object_key'])
+                except StorageError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(dict(ok=result, cloud_storage=await self.cloud.snapshot()), headers={'Cache-Control': 'no-store'})
             if action == 'quality_probe':
                 await self.quality.schedule(data.get('source'))
                 return web.json_response(await self.status(compact=True))

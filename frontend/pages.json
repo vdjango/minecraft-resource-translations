@@ -54,6 +54,7 @@
   ],
   "admin-mirror": [
     "admin.js",
-    "admin-mirror.js"
+    "admin-mirror.js",
+    "admin-mirror-cloud.js"
   ]
 }

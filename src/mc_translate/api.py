@@ -1765,6 +1765,7 @@ async def create_app(
         ("/admin/mirror/settings", "admin-mirror.html"),
         ("/admin/mirror/settings/downloads", "admin-mirror.html"),
         ("/admin/mirror/settings/storage", "admin-mirror.html"),
+        ("/admin/mirror/settings/cloud", "admin-mirror.html"),
         ("/admin/mirror/settings/distribution", "admin-mirror.html"),
         ("/admin/mirror/settings/sources", "admin-mirror.html"),
         ("/admin/mirror/settings/quality", "admin-mirror.html"),

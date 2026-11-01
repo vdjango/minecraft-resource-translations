@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -168,7 +169,8 @@ class RoomCache:
             CREATE INDEX IF NOT EXISTS files_age ON files(touched);
             CREATE INDEX IF NOT EXISTS files_sha1 ON files(sha1);
             CREATE INDEX IF NOT EXISTS files_digest ON files(digest);
-            CREATE TABLE IF NOT EXISTS objects(digest TEXT PRIMARY KEY, size INTEGER, created REAL);
+            CREATE TABLE IF NOT EXISTS objects(digest TEXT PRIMARY KEY, size INTEGER, created REAL,
+                local INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS sources(host TEXT PRIMARY KEY, url TEXT, checked REAL DEFAULT 0,
                 speed REAL DEFAULT 0, bad INTEGER DEFAULT 0, samples INTEGER DEFAULT 0, touched REAL);
             CREATE TABLE IF NOT EXISTS budget(day INTEGER PRIMARY KEY, bytes INTEGER);
@@ -178,6 +180,10 @@ class RoomCache:
         for column in ('lease_until', 'demanded'):
             if column not in columns:
                 await self.db.execute(f'ALTER TABLE files ADD COLUMN {column} REAL DEFAULT 0')
+        async with self.db.execute('PRAGMA table_info(objects)') as cursor:
+            object_columns = {row['name'] for row in await cursor.fetchall()}
+        if 'local' not in object_columns:
+            await self.db.execute('ALTER TABLE objects ADD COLUMN local INTEGER NOT NULL DEFAULT 1')
         await self.db.commit()
         self.http = ClientSession(timeout=ClientTimeout(total=8, connect=3, sock_read=4),
             connector=TCPConnector(limit=1, resolver=PublicResolver()), auto_decompress=False,
@@ -205,8 +211,8 @@ class RoomCache:
     async def cached(self, digest):
         row = await self.one('SELECT * FROM objects WHERE digest=?', (digest,))
         live = await self.one('SELECT 1 FROM files WHERE digest=? AND lease_until>? LIMIT 1', (digest, time.time()))
-        if (row and live
-                and self.path(digest).is_file()):
+        if (row and live and (self.path(digest).is_file()
+                             or await self.mirror.cloud.download_url('room', digest))):
             return row
 
     async def lease(self, row, action, reason):
@@ -340,7 +346,7 @@ class RoomCache:
                 return web.json_response(dict(state='cached'), headers={'Cache-Control': 'no-store'})
             if digest in self.uploading or len(self.uploading) >= 2:
                 raise web.HTTPTooManyRequests(text='文件补传正在进行，请稍后继续。', headers={'Retry-After': '5'})
-            used = (await self.one('SELECT COALESCE(SUM(size),0) n FROM objects'))['n']
+            used = (await self.one('SELECT COALESCE(SUM(size),0) n FROM objects WHERE local=1'))['n']
             free = (await asyncio.to_thread(shutil.disk_usage, self.root)).free
             if (used + self.reserved + size > self.settings()['room_cache_quota_mib'] * 1024 ** 2
                     or free - self.reserved - size < self.settings()['reserve_gib'] * 1024 ** 3):
@@ -365,8 +371,15 @@ class RoomCache:
             async with self.lock:
                 # Atomic publish; no partial response can ever be downloaded.
                 await asyncio.to_thread(os.replace, temp, self.path(digest))
-                await self.db.execute('INSERT OR REPLACE INTO objects VALUES(?,?,?)', (digest, size, time.time()))
+                await self.db.execute('INSERT OR REPLACE INTO objects(digest,size,created,local) VALUES(?,?,?,1)',
+                                      (digest, size, time.time()))
                 await self.db.commit()
+            route = ('room_mods' if row['path'].startswith('mods/') else
+                     'room_resourcepacks' if row['path'].startswith('resourcepacks/') else 'room_shaderpacks')
+            try:
+                await self.mirror.cloud.enqueue('room', digest, size, route)
+            except Exception:
+                logging.exception('Room cloud copy could not be queued; local file remains available')
             return web.json_response(dict(state='cached'), headers={'Cache-Control': 'no-store'})
         finally:
             temp.unlink(missing_ok=True)
@@ -382,6 +395,18 @@ class RoomCache:
             if not row:
                 raise web.HTTPNotFound(text='尚未收录此文件信息。')
             cached = await self.cached(digest)
+            if cached:
+                route = ('room_mods' if row['path'].startswith('mods/') else
+                         'room_resourcepacks' if row['path'].startswith('resourcepacks/') else 'room_shaderpacks')
+                lease = await self.one('SELECT MAX(lease_until) expires FROM files WHERE digest=?', (digest,))
+                cloud_url = await self.mirror.cloud.download_url('room', digest,
+                    expires_seconds=max(1, int(lease['expires'] - time.time())))
+                if cloud_url and (self.settings()['qiniu_routes'][route]['mode'] == 'cloud'
+                                  or not self.path(digest).is_file()):
+                    return web.Response(status=307, headers={'Location': cloud_url,
+                        'Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store'})
+                if not self.path(digest).is_file():
+                    cached = None
             if cached:
                 async with self.mirror.space_lock:
                     blocked = await self.mirror.egress.admit(requested_bytes(request, cached['size']),
@@ -402,7 +427,12 @@ class RoomCache:
             async with self.db.execute('SELECT digest FROM objects WHERE NOT EXISTS (SELECT 1 FROM files WHERE files.digest=objects.digest AND lease_until>?)', (time.time(),)) as cursor:
                 for row in await cursor.fetchall():
                     digest = row['digest']
-                    if digest not in self.serving and digest not in self.uploading:
+                    if digest not in self.serving and digest not in self.uploading and self.mirror.cloud.active_digest != digest:
+                        try:
+                            await self.mirror.cloud.delete_room(digest)
+                            await self.mirror.cloud.discard_room_jobs(digest)
+                        except (OSError, RuntimeError):
+                            continue
                         self.path(digest).unlink(missing_ok=True)
                         await self.db.execute('DELETE FROM objects WHERE digest=?', (digest,))
             await self.db.execute('DELETE FROM files WHERE touched<? AND lease_until<=?', (time.time() - 32 * 3600, time.time()))
@@ -466,7 +496,7 @@ class RoomCache:
                 continue
 
     async def snapshot(self):
-        totals = await self.one('SELECT COUNT(*) files,COALESCE(SUM(size),0) bytes FROM objects')
+        totals = await self.one('SELECT COUNT(*) files,COALESCE(SUM(size*local),0) bytes FROM objects')
         async with self.db.execute('SELECT path,size,reason,touched FROM files ORDER BY touched DESC LIMIT 50') as cursor:
             recent = [dict(row) for row in await cursor.fetchall()]
         async with self.db.execute('SELECT host,speed,bad,samples,checked FROM sources ORDER BY host') as cursor:
