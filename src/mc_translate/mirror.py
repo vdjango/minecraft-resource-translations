@@ -685,7 +685,7 @@ class Mirror:
             return self.redirect(cloud_url, category, 'verified_cloud_copy', 'cloud')
         if not local_path.is_file():
             if own_origin_only:
-                raise web.HTTPServiceUnavailable(text='Buggcraft ???????????', headers={'Retry-After':'30'})
+                raise web.HTTPServiceUnavailable(text='Buggcraft 源站暂无此文件的本地副本。', headers={'Retry-After':'30'})
             return await self.fallback(settings, path, urls[0], category, 'cloud_unavailable', direct)
         immutable = bool(re.search(r'/[a-f0-9]{40}(?:/|$)', urls[0]))
         # Pin under the same lock used by eviction, rechecking after any download.
