@@ -19,7 +19,7 @@ import aiosqlite
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
 from .config import Config, load_env
-from .mirror_catalog import Inventory, MANIFEST, allowed_url
+from .mirror_catalog import Inventory, MANIFEST, allowed_url, route_for
 from .mirror_policy import POLICIES, MODES, category_for
 from .mirror_routing import ROUTING_DEFAULTS, Egress, requested_bytes, source_target, source_targets, validate_sources
 from .federation import origin, PublicResolver
@@ -210,6 +210,7 @@ class Mirror:
         self.backups = {}
         self.probes = {}
         self.origin_health = {}
+        self.failed_urls = set()
         self.node_health = {}
         self.touched = {}
         self.serving = {}
@@ -221,6 +222,7 @@ class Mirror:
         self.source_job = None
         self.source_scan_state = dict(state='idle')
         self.next_refresh = None
+        self.refresh_deferred_at = None
         self.last_refresh = None
         self.job_state = dict(state='idle')
         self.inventory = None
@@ -252,6 +254,11 @@ class Mirror:
             CREATE INDEX IF NOT EXISTS cache_object ON cache(object);
             CREATE TABLE IF NOT EXISTS priorities(url TEXT PRIMARY KEY, priority REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS priorities_order ON priorities(priority DESC);
+            CREATE TABLE IF NOT EXISTS mirror_failed_files(
+                url TEXT PRIMARY KEY, category TEXT NOT NULL, status INTEGER,
+                error TEXT NOT NULL, attempts INTEGER NOT NULL,
+                first_failed REAL NOT NULL, last_failed REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS failed_files_order ON mirror_failed_files(last_failed);
         ''')
         async with self.db.execute('PRAGMA table_info(objects)') as cursor:
             object_columns = {row['name'] for row in await cursor.fetchall()}
@@ -260,6 +267,8 @@ class Mirror:
                 await self.db.execute(f'ALTER TABLE objects ADD COLUMN {name} {"INTEGER NOT NULL DEFAULT 1" if name == "local" else "REAL NOT NULL DEFAULT 0"}')
         await self.db.execute('CREATE INDEX IF NOT EXISTS eviction_objects ON objects(priority,accessed)')
         await self.db.execute('CREATE INDEX IF NOT EXISTS eviction_access ON objects(accessed)')
+        async with self.db.execute('SELECT url FROM mirror_failed_files') as cursor:
+            self.failed_urls = {row['url'] for row in await cursor.fetchall()}
         if not await self.one('SELECT id FROM totals WHERE id=1'):
             await self.db.execute('INSERT OR IGNORE INTO objects(digest,size,accessed) SELECT object,MAX(size),MAX(fetched) FROM cache GROUP BY object')
             await self.db.execute('INSERT INTO totals VALUES(1,(SELECT COALESCE(SUM(size),0) FROM objects),(SELECT COUNT(*) FROM cache))')
@@ -307,6 +316,24 @@ class Mirror:
         async with self.db.execute(sql, args) as cursor:
             return await cursor.fetchone()
 
+    async def remember_failure(self, url, exc):
+        detail = (exc.text if isinstance(exc, web.HTTPException) else str(exc))[:240]
+        await self.db.execute('''INSERT INTO mirror_failed_files
+            (url,category,status,error,attempts,first_failed,last_failed)
+            VALUES(?,?,?,?,1,?,?) ON CONFLICT(url) DO UPDATE SET
+            status=excluded.status,error=excluded.error,attempts=attempts+1,
+            last_failed=excluded.last_failed''',
+            (url, category_for(url), getattr(exc, 'status', None), detail, time.time(), time.time()))
+        await self.db.commit()
+        self.failed_urls.add(url)
+
+    async def clear_failure(self, url):
+        if url not in self.failed_urls:
+            return
+        await self.db.execute('DELETE FROM mirror_failed_files WHERE url=?', (url,))
+        await self.db.commit()
+        self.failed_urls.discard(url)
+
     async def status(self, *, compact=False):
         totals = await self.one('SELECT bytes,files FROM totals WHERE id=1')
         used, count = totals['bytes'], totals['files']
@@ -319,7 +346,8 @@ class Mirror:
                     source_mappings=source_mappings,
                     cached_bytes=used, cached_files=count, disk_total=disk.total, disk_free=disk.free,
                     active_downloads=len(self.inflight), job={**self.job_state, **({'progress': self.inventory.progress} if self.inventory else {})},
-                    refresh=dict(next_at=self.next_refresh, last=self.last_refresh),
+                    refresh=dict(next_at=self.next_refresh, last=self.last_refresh,
+                                 deferred_at=self.refresh_deferred_at),
                     automatic_sources=source_status(self.root),
                     source_statistics=await self.sources.summary(),
                     source_quality=await self.quality.snapshot(),
@@ -437,7 +465,26 @@ class Mirror:
             await self.db.executemany('INSERT OR REPLACE INTO expected VALUES(?,?,?,?)', rows)
             await self.db.commit()
 
-    async def download(self, url):
+    async def alternate_download(self, url, settings, original):
+        path = route_for(url)
+        mapped = self.quality.ranked(path, source_targets(settings, path, 'redirect'))[:2]
+        peer = self.select_node(settings, category_for(url), include_local=False)
+        targets = [(target, '来源映射') for target in mapped if target != url]
+        if peer:
+            targets.append((peer + '/_mirror_node' + quote(path, safe='/@+'), '协作节点'))
+        failures = []
+        for target, kind in targets:
+            try:
+                return await self.download(url, target)
+            except (web.HTTPException, ClientError, asyncio.TimeoutError, OSError) as exc:
+                detail = exc.text if isinstance(exc, web.HTTPException) else str(exc)
+                failures.append(f'{kind} {urlsplit(target).hostname}: HTTP {getattr(exc, "status", "连接错误")} {detail[:80]}')
+        if failures:
+            initial = original.text if isinstance(original, web.HTTPException) else str(original)
+            raise web.HTTPBadGateway(text=f'主源失败：{initial[:100]}；替代来源也失败：{"; ".join(failures)[:220]}') from original
+        return None
+
+    async def download(self, url, fetch_url=None):
         if not allowed_url(url):
             raise web.HTTPNotFound()
         settings = read_settings(self.config)
@@ -457,11 +504,11 @@ class Mirror:
         progress = dict(bytes=0, total=None, started_at=time.time())
         self.observation.transfers[url] = progress
         try:
-            async with self.http.get(url, allow_redirects=False) as response:
+            async with self.http.get(fetch_url or url, allow_redirects=False) as response:
                 if response.status == 404:
-                    raise web.HTTPNotFound()
+                    raise web.HTTPNotFound(text='上游返回 HTTP 404：文件不存在或路径已变更')
                 if response.status != 200 or response.headers.get('Content-Encoding', 'identity') != 'identity':
-                    raise web.HTTPBadGateway(text='Upstream response unavailable; redirects are not followed.')
+                    raise web.HTTPBadGateway(text=f'上游返回 HTTP {response.status}；重定向或压缩响应不能作为原文件缓存')
                 size = response.content_length
                 progress['total'] = size
                 if size is not None and size > 2 * GIB:
@@ -522,10 +569,20 @@ class Mirror:
                 except Exception:
                     logging.exception('Cloud copy could not be queued; local file remains available')
                 return await self.cached(url)
+        except web.HTTPException as exc:
+            if fetch_url is None and reservation == 0 and exc.status in (404, 502):
+                alternate = await self.alternate_download(url, settings, exc)
+                if alternate is not None:
+                    return alternate
+            raise
         except (ClientError, asyncio.TimeoutError) as exc:
             if old:
                 return old
-            raise web.HTTPBadGateway(text='Official upstream temporarily unavailable') from exc
+            if fetch_url is None and reservation == 0:
+                alternate = await self.alternate_download(url, settings, exc)
+                if alternate is not None:
+                    return alternate
+            raise web.HTTPBadGateway(text=f'连接上游失败：{type(exc).__name__}: {str(exc)[:120]}') from exc
         finally:
             self.observation.transfers.pop(url, None)
             part.unlink(missing_ok=True)
@@ -798,7 +855,7 @@ class Mirror:
                     used = (await self.one('SELECT bytes FROM totals WHERE id=1'))['bytes']
                     if used + self.reserved > settings['quota_gib'] * GIB:
                         raise web.HTTPInsufficientStorage(text='Active downloads or protected versions exceed quota')
-            elif action in ('inventory', 'prefetch', 'refresh', 'source_cleanup'):
+            elif action in ('inventory', 'prefetch', 'refresh', 'retry_failures', 'source_cleanup'):
                 if self.job and not self.job.done():
                     raise web.HTTPConflict(text='A mirror job is already running')
                 self.job_state = dict(state='running', action=action, trigger='manual', started_at=time.time())
@@ -823,9 +880,11 @@ class Mirror:
             if action in ('inventory', 'refresh'):
                 self.inventory = Inventory(self.root, read_settings(self.config)['concurrency'])
                 report = await self.inventory.scan(incremental=action == 'refresh')
-                if not report['complete']:
+                if not report['complete'] and action == 'inventory':
                     self.job_state.update(state='incomplete', report=report)
                     return
+                if not report['complete']:
+                    self.job_state['catalog_errors'] = report['errors'][:20]
                 items = list(self.inventory.items.values())
                 await self.db.executemany('INSERT OR REPLACE INTO expected VALUES(?,?,?,?)',
                                          [(i['url'], i['sha1'], i['size'], i['category']) for i in items])
@@ -836,13 +895,26 @@ class Mirror:
                 if read_settings(self.config)['auto_sources']:
                     await self.discover_sources()
                 self.job_state.update(state='finished', report=report)
-            if action in ('prefetch', 'refresh'):
-                data = json.loads(await asyncio.to_thread((self.root / 'inventory.json').read_text, encoding='utf-8'))
-                if not data['report']['complete']:
-                    raise ValueError('Inventory incomplete; run inventory again first')
-                files = data['files']
-                if action == 'refresh':
-                    files = [i for i in files if i['url'] in self.inventory.changed_urls]
+            if action in ('prefetch', 'refresh', 'retry_failures'):
+                if action == 'retry_failures':
+                    async with self.db.execute(
+                            'SELECT url FROM mirror_failed_files ORDER BY last_failed ASC LIMIT 200') as cursor:
+                        failures = [row['url'] for row in await cursor.fetchall()]
+                    files = []
+                    for url in failures:
+                        if not url or not allowed_url(url):
+                            continue
+                        known = await self.one('SELECT sha1,size,category FROM expected WHERE url=?', (url,))
+                        files.append(dict(url=url, path=route_for(url), category=known['category'] if known else category_for(url),
+                                          priority=0, size=known['size'] if known else None,
+                                          sha1=known['sha1'] if known else None))
+                elif action == 'refresh':
+                    files = [i for i in self.inventory.items.values() if i['url'] in self.inventory.changed_urls]
+                else:
+                    data = json.loads(await asyncio.to_thread((self.root / 'inventory.json').read_text, encoding='utf-8'))
+                    if not data['report']['complete']:
+                        raise ValueError('Inventory incomplete; run inventory again first')
+                    files = data['files']
                 quality_settings = read_settings(self.config)
                 files.sort(key=lambda i: (i.get('priority', 0), self.quality.needs_cache(
                     i.get('path', ''), source_targets(quality_settings, i.get('path', ''), 'redirect'))), reverse=True)
@@ -852,9 +924,11 @@ class Mirror:
                                          [(i['url'], i.get('priority', 0)) for i in files])
                 await self.db.execute('UPDATE objects SET priority=MAX(priority,COALESCE((SELECT MAX(p.priority) FROM cache c JOIN priorities p ON p.url=c.url WHERE c.object=objects.digest),0))')
                 await self.db.commit()
-                # Sequential background prefetch leaves capacity for interactive downloads.
                 self.job_state.update(state='running', done=0, total=len(files), errors=0, failed=[], skipped=0, cached=0)
-                for item in files:
+                remaining = iter(files)
+                disk_limited = False
+                async def fetch_item(item):
+                    nonlocal disk_limited
                     if not read_settings(self.config)['enabled']:
                         raise ValueError('Mirror disabled')
                     for attempt in range(3):
@@ -864,35 +938,58 @@ class Mirror:
                         if (settings['policies'][category] not in ('cache', 'backup')
                                 or mapped and not self.quality.needs_cache(item.get('path', ''), mapped)):
                             self.job_state['skipped'] += 1
+                            await self.clear_failure(item['url'])
                             break
                         try:
                             await self.ensure(item['url'])
+                            await self.clear_failure(item['url'])
                             self.job_state['cached'] += 1
                             break
                         except web.HTTPInsufficientStorage:
-                            self.job_state.update(state='disk_limit')
+                            disk_limited = True
                             return
                         except (web.HTTPException, OSError) as exc:
                             if attempt < 2 and getattr(exc, 'status', 502) not in (400, 404):
                                 await asyncio.sleep(2 ** attempt)
                                 continue
                             self.job_state['errors'] += 1
-                            failure = dict(url=item['url'], error=str(exc)[:160])
+                            await self.remember_failure(item['url'], exc)
+                            failure = dict(url=item['url'], status=getattr(exc, 'status', None),
+                                           error=(exc.text if isinstance(exc, web.HTTPException) else str(exc))[:180])
                             self.job_state['failed'] = [*self.job_state['failed'][-19:], failure]
                             logging.warning('Mirror prefetch failed: %s %s', item['url'], exc)
                             break
                     self.job_state['done'] += 1
+                async def worker():
+                    while not disk_limited:
+                        item = next(remaining, None)
+                        if item is None:
+                            return
+                        await fetch_item(item)
+                # Keep two slots available for interactive downloads when possible.
+                worker_count = max(1, read_settings(self.config)['concurrency'] - 2)
+                await asyncio.gather(*(worker() for _ in range(worker_count)))
+                if disk_limited:
+                    self.job_state['state'] = 'disk_limit'
+                    return
                 if action == 'refresh' and read_settings(self.config)['policies']['loaders'] in ('cache', 'backup'):
                     # Mutable loader feeds are small and independent of the vanilla catalogue.
-                    for path in ('/fabric-meta/v2/versions/loader', '/quilt-meta/v3/versions/loader',
-                                 '/maven/net/minecraftforge/forge/maven-metadata.xml',
-                                 '/neoforge-maven/releases/net/neoforged/neoforge/maven-metadata.xml'):
+                    async def refresh_loader(path):
                         try:
-                            await self.ensure(upstreams(path)[0])
+                            url = upstreams(path)[0]
+                            await self.ensure(url)
+                            await self.clear_failure(url)
                         except (web.HTTPException, OSError) as exc:
                             self.job_state['errors'] += 1
-                            self.job_state['failed'] = [*self.job_state['failed'][-19:], dict(path=path, error=str(exc)[:160])]
-                self.job_state['state'] = 'incomplete' if self.job_state['errors'] else 'finished'
+                            await self.remember_failure(url, exc)
+                            self.job_state['failed'] = [*self.job_state['failed'][-19:], dict(path=path,
+                                status=getattr(exc, 'status', None),
+                                error=(exc.text if isinstance(exc, web.HTTPException) else str(exc))[:180])]
+                    await asyncio.gather(*(refresh_loader(path) for path in (
+                        '/fabric-meta/v2/versions/loader', '/quilt-meta/v3/versions/loader',
+                        '/maven/net/minecraftforge/forge/maven-metadata.xml',
+                        '/neoforge-maven/releases/net/neoforged/neoforge/maven-metadata.xml')))
+                self.job_state['state'] = 'incomplete' if self.job_state['errors'] or self.job_state.get('catalog_errors') else 'finished'
         except asyncio.CancelledError:
             self.job_state['state'] = 'cancelled'
             raise
@@ -942,10 +1039,15 @@ class Mirror:
             else:
                 if scheduled_interval != interval or self.next_refresh is None:
                     scheduled_interval, self.next_refresh = interval, time.time() + interval
-                if time.time() >= self.next_refresh and (not self.job or self.job.done()):
-                    self.job_state = dict(state='running', action='refresh', trigger='scheduled', started_at=time.time())
-                    self.job = asyncio.create_task(self.run_job('refresh'))
-                    self.next_refresh = time.time() + interval
+                if time.time() >= self.next_refresh:
+                    if self.job and not self.job.done():
+                        self.refresh_deferred_at = time.time()
+                        self.next_refresh = time.time() + interval
+                    else:
+                        self.refresh_deferred_at = None
+                        self.job_state = dict(state='running', action='refresh', trigger='scheduled', started_at=time.time())
+                        self.job = asyncio.create_task(self.run_job('refresh'))
+                        self.next_refresh = time.time() + interval
             await asyncio.sleep(5)
 
     async def discover_sources(self):

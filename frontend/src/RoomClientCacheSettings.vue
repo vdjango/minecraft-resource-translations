@@ -15,7 +15,7 @@
     <div class="mirror-settings-grid">
       <label class="full"><span><input id="room-cache-enabled" type="checkbox"> 启用房间客户端文件兜底</span></label>
       <label>每次缓存需求保留时间（小时）<input id="room-cache-ttl-hours" type="number" min="1" max="32" required><small>默认 8 小时，最多 32 小时；跨房间共用一份文件，全部需求到期才清理，轮询不会续期。</small></label>
-      <label>临时容量上限（MiB）<input id="room-cache-quota-mib" type="number" min="1" max="1048576" required></label>
+      <label>临时容量上限（GiB）<input id="room-cache-quota-gib" type="number" min="0.1" max="1024" step="0.1" required><small>仅限制房间客户端临时文件，不占用普通镜像缓存配额。</small></label>
       <label>单个文件上限（MiB）<input id="room-cache-max-file-mib" type="number" min="1" max="2048" required></label>
       <label>慢速阈值（KiB/s）<input id="room-cache-slow-kibps" type="number" min="1" max="102400" required><small>默认 100，连续两次慢速采样才触发。</small></label>
       <label class="full"><span><input id="room-cache-probe-enabled" type="checkbox"> 在后台限量采样公开来源</span></label>

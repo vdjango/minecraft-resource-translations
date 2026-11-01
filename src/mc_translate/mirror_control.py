@@ -55,7 +55,7 @@ class MirrorControl:
             if not isinstance(data, dict):
                 raise ValueError('expected a JSON object')
             if 'action' in data:
-                if data['action'] not in ('inventory', 'prefetch', 'cancel', 'refresh', 'source_scan', 'source_files', 'source_preview', 'source_cleanup', 'quality_probe', 'quality_history', 'cache_files', 'room_files', 'cloud_migrate', 'cloud_retry', 'cloud_probe', 'cloud_test'):
+                if data['action'] not in ('inventory', 'prefetch', 'retry_failures', 'cancel', 'refresh', 'source_scan', 'source_files', 'source_preview', 'source_cleanup', 'quality_probe', 'quality_history', 'cache_files', 'room_files', 'cloud_migrate', 'cloud_retry', 'cloud_probe', 'cloud_test'):
                     raise ValueError('invalid mirror action')
                 arguments = dict(action=data['action'])
                 if data['action'] in ('cache_files', 'room_files'):

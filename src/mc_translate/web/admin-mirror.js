@@ -1,17 +1,31 @@
 "use strict";
 function mirrorBytes(value){return (Number(value||0)/1024**3).toFixed(2)+' GiB';}
+function mirrorSize(value){const bytes=Number(value||0);return bytes>=1024**3?mirrorBytes(bytes):bytes>=1024**2?(bytes/1024**2).toFixed(1)+' MiB':(bytes/1024).toFixed(0)+' KiB';}
+function mirrorFailure(row){
+  const card=sourceElement('article');card.className='mirror-failure';
+  const raw=String(row.url||row.path||'未知文件');let host='';
+  try{host=new URL(raw).hostname;}catch{}
+  const status=Number(row.status)||(/Bad Gateway/i.test(row.error||'')?502:/404|Not Found/i.test(row.error||'')?404:0);
+  const label=status?'HTTP '+status:row.error?'请求异常':'失败';
+  const reason=row.error||'上游未返回可用文件';
+  const advice=status===404?'检查文件路径与版本是否仍在上游；可在「来源覆盖」寻找替代来源。':status>=500?'上游暂时不可用；稍后使用「只重试失败文件」，或在来源管理中启用替代源。':status===403?'上游拒绝访问；检查源的访问策略，换用其他来源。':'检查来源连接、文件校验及磁盘余量，再单独重试。';
+  card.append(sourceElement('strong',label+' · '+(host||'已配置来源')),sourceElement('code',raw),sourceElement('p',reason),sourceElement('small',advice));
+  return card;
+}
 const mirrorCategories=['core','loaders','mods','java','libraries','assets'];
-const roomCacheFields=['ttl_hours','quota_mib','max_file_mib','slow_kibps','probe_hours','probe_daily_mib'];
+const roomCacheFields=['ttl_hours','max_file_mib','slow_kibps','probe_hours','probe_daily_mib'];
 function roomCacheSettings(){
   return {room_cache_enabled:$('room-cache-enabled').checked,room_cache_probe_enabled:$('room-cache-probe-enabled').checked,
+    room_cache_quota_mib:Math.round(Number($('room-cache-quota-gib').value)*1024),
     ...Object.fromEntries(roomCacheFields.map(key=>['room_cache_'+key,Number($('room-cache-'+key.replaceAll('_','-')).value)]))};
 }
 function renderRoomCache(data,fill){
   const s=data.settings,state=data.room_client_cache||{};
   if(fill){for(const key of roomCacheFields)$('room-cache-'+key.replaceAll('_','-')).value=s['room_cache_'+key];
+    $('room-cache-quota-gib').value=Number((s.room_cache_quota_mib/1024).toFixed(2));
     $('room-cache-enabled').checked=s.room_cache_enabled;$('room-cache-probe-enabled').checked=s.room_cache_probe_enabled;}
   $('room-cache-state').textContent=!data.running?'资源进程离线，设置仍可保存。':!state.configured?'尚未配置节点授权密钥；不会开放匿名上传。':s.room_cache_enabled?'节点授权已配置，按房间权限提供兜底。':'客户端文件兜底已关闭。';
-  metrics($('room-cache-metrics'),[['临时文件',number(state.files),'按 SHA-256 去重'],['临时占用',mirrorBytes(state.bytes),'上限 '+s.room_cache_quota_mib+' MiB'],['正在补传',number(state.uploads),'最多同时 2 个'],['正在读取',number(state.downloads),'到期清理会跳过正在读取的文件']]);
+  metrics($('room-cache-metrics'),[['临时文件',number(state.files),'按 SHA-256 去重'],['临时占用',mirrorBytes(state.bytes),'上限 '+Number((s.room_cache_quota_mib/1024).toFixed(2))+' GiB'],['正在补传',number(state.uploads),'最多同时 2 个'],['正在读取',number(state.downloads),'到期清理会跳过正在读取的文件']]);
   const row=values=>{const tr=document.createElement('tr');for(const value of values){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}return tr;};
   $('room-cache-sources').replaceChildren(...(state.sources||[]).map(source=>row([source.host,source.samples?source.speed.toFixed(0)+' KiB/s':'观察中',source.bad+' / '+source.samples,qualityTime(source.checked)])));
 }
@@ -75,16 +89,24 @@ function renderMirror(data,fill=false){
   const last=data.refresh?.last;
   $('mirror-overview-last').textContent=last?'上次同步：'+qualityTime(last.at)+' · '+(last.state||'已完成'):'尚无自动同步记录';
   const room=data.room_client_cache||{};
-  $('room-cache-overview').textContent=number(room.files)+' 个实际文件 · '+mirrorBytes(room.bytes)+' / '+(s.room_cache_quota_mib||0)+' MiB 限额';
+  $('room-cache-overview').textContent=number(room.files)+' 个实际文件 · '+mirrorBytes(room.bytes)+' / '+mirrorBytes((s.room_cache_quota_mib||0)*1024**2)+' 上限';
   $('mirror-storage-bars').replaceChildren(...[['镜像缓存',data.cached_bytes,s.quota_gib*1024**3],['客户端临时缓存',room.bytes,s.room_cache_quota_mib*1024**2]].map(([label,used,limit])=>{
     const host=sourceElement('div');host.className='mirror-storage-row';const top=sourceElement('div');top.append(sourceElement('strong',label),sourceElement('span',mirrorBytes(used)+' / '+mirrorBytes(limit)));
     const meter=document.createElement('meter');meter.min=0;meter.max=Number(limit)||1;meter.value=Math.min(Number(used)||0,Number(limit)||1);host.append(top,meter);return host;
   }));
+  const cachedGiB=Number(data.cached_bytes||0)/1024**3,freeGiB=Number(data.disk_free||0)/1024**3;
+  const available=Math.max(0,Math.min(s.quota_gib-cachedGiB,freeGiB-s.reserve_gib));
+  const recentPrefetch=(data.operations?.history||[]).find(item=>item.action==='prefetch');
+  const stopReason=recentPrefetch?.state==='cancelled'?'上次预下载被停止，可在同步任务中继续。':recentPrefetch?.state==='disk_limit'?'上次触发空间保护线。':'按策略跳过的文件不会写入本地。';
+  $('mirror-quota-reason').textContent='已用 '+cachedGiB.toFixed(2)+' / '+s.quota_gib+' GiB；按配额与磁盘保留量，目前最多还能新增约 '+available.toFixed(2)+' GiB。上限不是自动填满的目标。'+stopReason;
+  $('mirror-resource-summary').textContent='本机实际占用 '+cachedGiB.toFixed(2)+' GiB，共 '+number(data.cached_files)+' 个文件。清单合计、远端映射和房间临时文件不计入此数。';
+  const catalogue=data.inventory||{};
+  $('mirror-catalog-summary').textContent=catalogue.known_bytes?'资源清单发现约 '+mirrorBytes(catalogue.known_bytes)+'（全部版本与平台的潜在文件）；按当前类别策略可预下载约 '+mirrorBytes(data.selection?.local_bytes)+'。这两项都是估算范围，不是本地已存数据。':'尚未扫描资源清单；清单总大小不是本地占用。';
   $('mirror-node-status').replaceChildren(...(data.nodes||[]).map(n=>{const span=document.createElement('span');span.textContent=new URL(n.url).hostname+' · '+(!n.enabled?'停用':n.healthy?'在线':'检查中 / 不可用');return span;}));
   $('mirror-egress-state').textContent=data.egress?`本月（UTC ${data.egress.period}）已接受资源 ${mirrorBytes(data.egress.bytes)} · 最近一分钟 ${mirrorBytes(data.egress.window_bytes)} · ${data.accepting?'本机可继续接收':'将优先转移下载'}`:'镜像上线后显示资源出口统计';
   renderSourceStatistics(data);renderQuality(data);renderRoomCache(data,fillSettings);renderCloud(data.cloud_storage||{},s,fillSettings);mirrorRules(s.public_url);
   const states={idle:'空闲',running:'运行中',finished:'已完成',failed:'失败',cancelled:'已停止',disk_limit:'已到空间保护线',incomplete:'部分完成，请检查错误后重试'};
-  const actions={refresh:'自动同步',inventory:'清单扫描',prefetch:'预下载',source_cleanup:'本地副本清理',source_scan:'来源映射扫描'};
+  const actions={refresh:'增量同步',inventory:'清单扫描',prefetch:'预下载',retry_failures:'失败文件重试',source_cleanup:'本地副本清理',source_scan:'来源映射扫描'};
   const job=data.job||{state:'idle'};
   const op=data.operations||{};
   $('mirror-overview-job').textContent=job.action?((actions[job.action]||job.action)+' · '+(states[job.state]||job.state)):'暂无正在执行的同步任务';
@@ -94,16 +116,30 @@ function renderMirror(data,fill=false){
   const processed=Number(job.done??progress.done??0),total=Number(job.total??progress.total??0);
   $('mirror-job-progress').replaceChildren();
   if(total>0){const label=sourceElement('p',number(processed)+' / '+number(total)+' 个文件 · '+Math.min(100,processed/total*100).toFixed(1)+'%');const bar=document.createElement('progress');bar.max=total;bar.value=Math.min(processed,total);$('mirror-job-progress').append(label,bar);}
-  $('mirror-job-failures').replaceChildren(...(job.failed||[]).slice(-8).map(row=>sourceElement('p',(row.path||row.url||'未知文件')+' · '+(row.error||'下载失败'))));
-  const transferRows=(op.transfers||[]).map(item=>[new URL(item.url).pathname,mirrorBytes(item.bytes)+(item.total?' / '+mirrorBytes(item.total):''),qualitySpeed(item.speed),qualityTime(item.started_at)]);
+  const queued=op.failed_queue||{count:0,files:[]};
+  const catalogFailures=[...(job.catalog_errors||[]),...(job.report?.errors||[])];
+  const shown=[...(queued.files||[]),...catalogFailures].slice(0,8);
+  $('mirror-job-failures').replaceChildren(...(shown.length?shown.map(mirrorFailure):[sourceElement('p','待补齐队列为空；当前没有清单扫描错误。')]));
+  $('mirror-failure-count').textContent=number(queued.count)+' 个文件待补齐'+(catalogFailures.length?' · 清单扫描失败 '+number(catalogFailures.length)+' 项':'');
+  $('mirror-transfer-capacity').textContent='活跃 '+number((op.transfers||[]).length)+' / 后台最多 '+Math.max(1,s.concurrency-2)+' 路 · 全站上限 '+s.concurrency;
+  $('mirror-task-activity').textContent=job.state==='running'?'当前任务持续执行；单个文件失败进入待补齐队列，不阻塞其他文件。':data.refresh?.deferred_at?'上一轮运行时定时同步已顺延；下一次按显示时间执行。':'没有正在执行的下载任务。失败文件保留在待补齐队列，可单独批量重试；清单扫描失败可重新扫描。';
+  const transferRows=(op.transfers||[]).map(item=>[new URL(item.url).pathname,mirrorSize(item.bytes)+(item.total?' / '+mirrorSize(item.total):''),qualitySpeed(item.speed),qualityTime(item.started_at)]);
   const makeRow=values=>{const tr=sourceElement('tr');for(const value of values)tr.append(sourceElement('td',value));return tr;};
   $('mirror-transfers').replaceChildren(...(transferRows.length?transferRows:[['暂无正在回源的文件','—','—','—']]).map(makeRow));
   const scan=op.source_scan||{};
-  $('mirror-background-activities').replaceChildren(sourceElement('p',op.source_scanning?'来源映射正在分批扫描':scan.finished_at?'上次来源映射：'+qualityTime(scan.finished_at)+' · '+({finished:'已完成',failed:'失败'}[scan.state]||scan.state):'来源映射扫描空闲'),sourceElement('p','已为进行中的下载预留 '+mirrorBytes(op.reserved_bytes)));
-  $('mirror-job-history').replaceChildren(...(op.history?.length?op.history:[{action:'暂无记录',state:'idle'}]).map(item=>makeRow([actions[item.action]||item.action||'同步',states[item.state]||item.state,'完成 '+number(item.done)+' / '+number(item.total)+' · 失败 '+number(item.errors),qualityTime(item.started_at)+(item.finished_at?' / '+qualityTime(item.finished_at):' / 进行中')])));
+  const scanCard=sourceElement('div');scanCard.append(sourceElement('strong','来源映射扫描'),sourceElement('p',op.source_scanning?'正在分批核验来源；不影响文件下载。':scan.finished_at?'最近完成：'+qualityTime(scan.finished_at)+' · '+({finished:'已完成',failed:'失败'}[scan.state]||scan.state):'尚未开始扫描'));
+  if(scan.error)scanCard.append(sourceElement('small','错误：'+scan.error+'；可在「来源覆盖」重新扫描。'));
+  const reserveCard=sourceElement('div');reserveCard.append(sourceElement('strong','下载空间预留'),sourceElement('p',mirrorSize(op.reserved_bytes)+' 已预留给正在下载的文件，完成或失败后释放；它不是已缓存文件。'));
+  $('mirror-background-activities').replaceChildren(scanCard,reserveCard);
+  $('mirror-job-history').replaceChildren(...(op.history?.length?op.history:[{action:'暂无记录',state:'idle'}]).map(item=>{
+    const row=makeRow([actions[item.action]||item.action||'同步',states[item.state]||item.state,'完成 '+number(item.done)+' / '+number(item.total)+' · 失败 '+number(item.errors),qualityTime(item.started_at)+(item.finished_at?' / '+qualityTime(item.finished_at):' / 进行中')]);
+    const examples=[...(item.failed||[]),...(item.catalog_errors||[]),...(item.report?.errors||[])];
+    if(examples.length){const details=sourceElement('details');details.append(sourceElement('summary','查看 '+number(examples.length)+' 项原因'),...examples.slice(-8).map(mirrorFailure));row.children[2].append(details);}
+    return row;
+  }));
   const report=data.inventory||job.report;
-  $('mirror-report').textContent=JSON.stringify(report?{...report,known_GiB:Number((report.known_bytes/1024**3).toFixed(2)),selected_local_GiB:data.selection?Number((data.selection.local_bytes/1024**3).toFixed(2)):undefined,job}:job,null,2);
-  const busy=job.state==='running';$('mirror-inventory').disabled=!data.running||busy;$('mirror-sync').disabled=!data.running||busy;$('mirror-prefetch').disabled=!data.running||busy||!report?.complete;$('mirror-cancel').disabled=!busy;
+  $('mirror-report').textContent=JSON.stringify(report?{...report,catalogue_potential_GiB:Number((report.known_bytes/1024**3).toFixed(2)),policy_selected_potential_GiB:data.selection?Number((data.selection.local_bytes/1024**3).toFixed(2)):undefined,actual_cached_GiB:Number((data.cached_bytes/1024**3).toFixed(2)),job}:job,null,2);
+  const busy=job.state==='running';$('mirror-inventory').disabled=!data.running||busy;$('mirror-sync').disabled=!data.running||busy;$('mirror-prefetch').disabled=!data.running||busy||!report?.complete;$('mirror-retry').disabled=!data.running||busy||!queued.count;$('mirror-cancel').disabled=!busy;
 }
 let mirrorLoading=false,mirrorViewInitialized=false,lastMirrorPoll=0;
 async function loadMirror(){
@@ -122,7 +158,7 @@ function mirrorSettings(){
 }
 $('mirror-settings').onsubmit=async event=>{event.preventDefault();const button=event.submitter;button.disabled=true;try{renderMirror(await api('v1/admin/mirror',mirrorSettings()),true);message('资源分发设置已保存。');}catch(e){showError(e);}finally{button.disabled=false;}};
 for(const key of mirrorCategories)$('mirror-policy-'+key).onchange=event=>{event.target.closest('label').dataset.mode=event.target.value;};
-for(const action of ['inventory','prefetch','cancel','refresh'])$(action==='refresh'?'mirror-sync':'mirror-'+action).onclick=async event=>{const button=event.currentTarget;button.disabled=true;try{renderMirror(await api('v1/admin/mirror',{action}));message(action==='cancel'?'后台同步任务已停止；正在提供服务的文件保留。':'后台任务已提交，可刷新查看进度。');}catch(e){showError(e);button.disabled=false;}};
+for(const action of ['inventory','prefetch','cancel','refresh','retry_failures'])$(action==='refresh'?'mirror-sync':action==='retry_failures'?'mirror-retry':'mirror-'+action).onclick=async event=>{const button=event.currentTarget;button.disabled=true;try{renderMirror(await api('v1/admin/mirror',{action}));message(action==='cancel'?'后台同步任务已停止；正在提供服务的文件保留。':'后台任务已提交，可刷新查看进度。');}catch(e){showError(e);button.disabled=false;}};
 const mirrorPoll=setInterval(()=>{
   if(document.visibilityState!=='visible'||$('panel').classList.contains('hidden'))return;
   const view=$('panel').dataset.mirrorView,interval=['overview','tasks','temporary'].includes(view)?5000:15000;
@@ -196,15 +232,16 @@ function renderSourceStatistics(data){
   const providers=data.settings.source_registries||[],counts=new Map((data.source_statistics||[]).map(row=>[row.source,row]));
   const verified=new Map((data.automatic_sources?.providers||[]).map(row=>[row.id,row]));
   const table=$('mirror-source-statistics');table.replaceChildren();
+  table.closest('table').querySelector('thead tr').replaceChildren(...['来源','已核验文件','本地副本数','本地占用','下载重定向','文件明细'].map(label=>sourceElement('th',label)));
   for(const source of providers){
     const stats=counts.get(source.id)||{},check=verified.get(source.id)||{},tr=sourceElement('tr');
-    for(const value of [source.name+(source.enabled?'':' · 停用'),number(stats.files??check.verified??0),number(stats.local_files||0)+' · '+mirrorBytes(stats.local_bytes),number(stats.redirects||0)])tr.append(sourceElement('td',value));
+    for(const value of [source.name+(source.enabled?'':' · 停用'),number(stats.files??check.verified??0),number(stats.local_files||0),mirrorSize(stats.local_bytes),number(stats.redirects||0)])tr.append(sourceElement('td',value));
     const cell=sourceElement('td'),button=sourceElement('button','查看文件');button.type='button';button.className='secondary';button.disabled=!data.running;button.onclick=()=>{$('mirror-source-filter').value=source.id;void loadSourceFiles(0).catch(showError);};cell.append(button);tr.append(cell);table.append(tr);
   }
   const filter=$('mirror-source-filter'),selection=filter.value,options=[sourceElement('option','全部来源')];options[0].value='';
   for(const source of providers){const option=sourceElement('option',source.name);option.value=source.id;options.push(option);}filter.replaceChildren(...options);filter.value=selection;
   const status=data.automatic_sources||{};
-  const sourceNotice=(status.generated_at?'最近扫描 '+new Date(status.generated_at*1000).toLocaleString('zh-CN')+' · 覆盖 '+number(status.matched)+' 个文件 · 待核验 '+number(status.remaining):'内置来源已就绪；等待完整资源清单，后台将分批核验并生成映射。')+(status.last_error?' · 部分来源暂不可用，将自动重试。':'');
+  const sourceNotice=(status.generated_at?'最近扫描 '+new Date(status.generated_at*1000).toLocaleString('zh-CN')+' · 覆盖 '+number(status.matched)+' 个文件 · 待核验 '+number(status.remaining):'内置来源已就绪；等待完整资源清单，后台将分批核验并生成映射。')+(status.last_error?' · 扫描错误：'+status.last_error+'。旧映射保留，可手动重新扫描。':'');
   $('mirror-source-notice').textContent=sourceNotice;
   $('mirror-source-notice-settings').textContent=sourceNotice;
   $('mirror-source-scan').disabled=!data.running||data.settings.auto_sources===false;
@@ -231,6 +268,7 @@ $('mirror-source-clean').onclick=async event=>{const button=event.currentTarget;
 
 const qualityGrades={excellent:'优',good:'良',poor:'待优化',observing:'观察中',stale:'已过期'};
 function qualitySpeed(value){return value==null?'尚无数据':value>=1024**2?(value/1024**2).toFixed(2)+' MiB/s':(value/1024).toFixed(0)+' KiB/s';}
+function qualityTier(value){const kib=Number(value||0)/1024;return !value?'待采样':kib<64?'低于 64 KiB/s':kib<128?'64–128 KiB/s':kib<256?'128–256 KiB/s':kib<512?'256–512 KiB/s':kib<1024?'512–1024 KiB/s':kib<2048?'1–2 MiB/s':kib<4096?'2–4 MiB/s':'4 MiB/s 以上';}
 function qualityTime(value){return value?new Date(value*1000).toLocaleString('zh-CN'):'等待安排';}
 function qualityButton(text,handler){const button=sourceElement('button',text);button.type='button';button.className='secondary';button.onclick=async()=>{button.disabled=true;try{await handler();}catch(error){showError(error);}finally{button.disabled=false;}};return button;}
 async function queueQuality(source){renderMirror(await api('v1/admin/mirror',{action:'quality_probe',...(source?{source}:{})}));message('已安排错峰采样；仍受单次间隔、每日预算和启用开关约束。');}
@@ -245,10 +283,19 @@ function renderQuality(data){
   const quality=data.source_quality||{};
   $('quality-budget').textContent=data.running?`今日采样预算：${((quality.daily_bytes||0)/1024**2).toFixed(2)} / ${((quality.daily_limit||0)/1024**2).toFixed(0)} MiB · 观测节点：${quality.observer||data.settings.public_url}`:'镜像进程启动后开始采样，历史记录保留在镜像数据库。';
   $('quality-probe-all').disabled=!data.running||!data.settings.quality_enabled;
-  $('quality-sources').replaceChildren(...(data.settings.source_registries||[]).map(source=>{
+  const sources=data.settings.source_registries||[],details=sources.map(source=>({source,q:quality.sources?.[source.id]||{}}));
+  const table=$('quality-sources'),parent=table.closest('.admin-card');
+  table.closest('table').querySelector('thead tr').replaceChildren(...['来源 / 评级','得分','速度档位','采样速度','可用率 / 样本','下次采样','管理'].map(label=>sourceElement('th',label)));
+  let chart=parent.querySelector('.quality-chart');if(!chart){chart=sourceElement('div');chart.className='quality-chart';parent.querySelector('.table-scroll').before(chart);}
+  const stable=details.filter(item=>item.q.score!=null);
+  const intro=sourceElement('p','近 7 天：已评级 '+stable.length+' / '+sources.length+' 个来源。分数综合速度档位与成功率；至少 8 次、跨 3 天采样后才评级。');intro.className='muted small';
+  const bars=sourceElement('div');bars.className='quality-chart-bars';
+  for(const {source,q} of details){const row=sourceElement('div');row.className='quality-chart-row';const meter=sourceElement('span');meter.className='quality-chart-track';const fill=sourceElement('i');fill.style.width=(q.score==null?3:Math.max(3,q.score))+'%';fill.className='quality-chart-fill grade-'+(q.grade||'observing');meter.append(fill);row.append(sourceElement('span',source.name),meter,sourceElement('strong',q.score==null?'待采样':q.score+' / 100'));bars.append(row);}
+  chart.replaceChildren(intro,bars,sourceElement('small','速度档位：<64、64、128、256、512、1024、2048、4096+ KiB/s；可用率低于 90% 降级。样本不足不参与自动淘汰。'));
+  $('quality-sources').replaceChildren(...sources.map(source=>{
     const q=quality.sources?.[source.id]||{},row=sourceElement('tr'),name=sourceElement('td');
     name.append(sourceElement('strong',source.name),sourceElement('small',(source.enabled?(qualityGrades[q.grade]||'观察中'):'已停用')+(q.cache_priority?' · 优先缓存':'')));name.className='source-quality-name';
-    row.append(name,sourceElement('td',qualitySpeed(q.speed_bps)),sourceElement('td',(q.success_rate==null?'—':(q.success_rate*100).toFixed(1)+'%')+' · '+(q.samples||0)+' 次 / '+(q.days||0)+' 天'),sourceElement('td',source.enabled?qualityTime(q.next_at):'—'));
+    row.append(name,sourceElement('td',q.score==null?'待采样':q.score+' / 100'),sourceElement('td',qualityTier(q.speed_bps)),sourceElement('td',qualitySpeed(q.speed_bps)),sourceElement('td',(q.success_rate==null?'—':(q.success_rate*100).toFixed(1)+'%')+' · '+(q.samples||0)+' 次 / '+(q.days||0)+' 天'),sourceElement('td',source.enabled?qualityTime(q.next_at):'—'));
     const actions=sourceElement('td');actions.className='quality-actions';
     const probe=qualityButton('采样',()=>queueQuality(source.id));probe.disabled=!data.running||!source.enabled||!data.settings.quality_enabled;
     const history=qualityButton('记录',()=>qualityHistory(source));history.disabled=!data.running;

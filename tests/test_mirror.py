@@ -60,6 +60,62 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         sha = hashlib.sha1(self.payload).hexdigest()
         return '/assets/' + sha[:2] + '/' + sha
 
+    async def test_failed_prefetch_continues_and_batch_retry_only_retries_missing_file(self):
+        paths = ['/maven/com/example/one/1.0/one-1.0.jar',
+                 '/maven/com/example/two/1.0/two-1.0.jar']
+        files = [dict(path=path, url=upstreams(path)[0], category='libraries',
+                      sha1=hashlib.sha1(self.payload).hexdigest(), size=len(self.payload), priority=0)
+                 for path in paths]
+        (self.mirror.root / 'inventory.json').write_text(
+            json.dumps(dict(report=dict(complete=True), files=files)), encoding='utf-8')
+        self.mirror.http.get = lambda url, **kw: self.http.get(
+            self.origin.make_url('/missing' if '/one-1.0.jar' in str(url) else '/data'), **kw)
+        self.mirror.job_state = dict(state='running', action='prefetch')
+        await self.mirror._run_job('prefetch')
+        self.assertEqual(self.mirror.job_state['state'], 'incomplete')
+        self.assertEqual(self.mirror.job_state['done'], 2)
+        self.assertEqual(self.mirror.job_state['cached'], 1)
+        self.assertEqual((await self.mirror.observation.snapshot())['failed_queue']['count'], 1)
+        self.mirror.http.get = lambda url, **kw: self.http.get(self.origin.make_url('/data'), **kw)
+        self.mirror.job_state = dict(state='running', action='retry_failures')
+        await self.mirror._run_job('retry_failures')
+        self.assertEqual(self.mirror.job_state['state'], 'finished')
+        self.assertEqual(self.mirror.job_state['total'], 1)
+        self.assertEqual((await self.mirror.observation.snapshot())['failed_queue']['count'], 0)
+
+    async def test_primary_failure_uses_verified_alternate_source(self):
+        path = self.asset()
+        url = upstreams(path)[0]
+        settings = read_settings(self.config)
+        settings['sources'] = [dict(prefix=path, target='https://verified.example' + path,
+                                    mode='redirect', enabled=True)]
+        write_json(settings_path(self.config), validate_settings(settings))
+        seen = []
+        def get(target, **kw):
+            seen.append(str(target))
+            return self.http.get(self.origin.make_url(
+                '/missing' if str(target) == url else '/data'), **kw)
+        self.mirror.http.get = get
+        item = await self.mirror.download(url)
+        self.assertEqual(item['size'], len(self.payload))
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(seen[1].startswith('https://verified.example/'))
+
+    async def test_primary_failure_uses_healthy_peer_when_no_mapped_source(self):
+        path = self.asset()
+        url = upstreams(path)[0]
+        seen = []
+        def get(target, **kw):
+            seen.append(str(target))
+            return self.http.get(self.origin.make_url(
+                '/missing' if str(target) == url else '/data'), **kw)
+        self.mirror.http.get = get
+        with patch.object(self.mirror, 'select_node', return_value='https://mirror2.bugg.icu'):
+            item = await self.mirror.download(url)
+        self.assertEqual(item['size'], len(self.payload))
+        self.assertEqual(len(seen), 2)
+        self.assertIn('/_mirror_node' + path, seen[1])
+
     async def test_pack_and_resource_zip_routes_use_origin_bytes(self):
         routes = {
             '/mods/modrinth/data/project/versions/release/pack.mrpack':

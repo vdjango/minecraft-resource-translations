@@ -272,7 +272,7 @@ class SourceDiscovery:
                             if not known or known['sha1']==item['sha1']:
                                 candidates.append((source,item['path'],item['sha1'],item['target']))
                     except Exception as exc:
-                        last_error = type(exc).__name__
+                        last_error = f'{source["name"]}: {type(exc).__name__}: {str(exc)[:120]}'
                         catalogue_errors[source['id']] = last_error
                         # Keep the previous verified index on transient index failure.
                         for old in self.records.values():
@@ -329,8 +329,8 @@ class SourceDiscovery:
                         record.pop('error',None)
                     except Exception as exc:
                         record['next_check'] = now+300
-                        record['error'] = type(exc).__name__
-                        last_error = type(exc).__name__
+                        record['error'] = f'{type(exc).__name__}: {str(exc)[:120]}'
+                        last_error = f'{record["source"]}: {record["error"]}'
                         if now-record.get('verified_at',0)>8*86400:
                             record['matched'] = False
             await asyncio.gather(*(check(record) for record in due))

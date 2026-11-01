@@ -96,5 +96,19 @@
 .session-loading p{margin:0}.session-dot{width:8px;height:8px;flex-shrink:0;border-radius:50%;background:var(--accent)}
 .record-actions{display:flex;justify-content:flex-end;gap:6px}
 .task-status-tabs{display:flex;gap:6px;margin:0 0 16px}.task-status-tabs button{padding:6px 16px;font-size:11px;border-color:transparent;background:transparent;color:var(--muted)}.task-status-tabs [aria-pressed="true"]{background:var(--raised);border-color:var(--line);color:var(--text)}
+/* Shared admin workspace: navigation remains distinct from the public site. */
+.admin-top-links a{padding:10px 14px;border-radius:9px;font-size:12px}.admin-top-links a.nav-active{background:var(--raised);color:var(--accent-soft)}
+#panel:not(.hidden):has(#resource-overview){display:flex;flex-direction:column}#resource-overview{order:-1}
+.admin-public-link{white-space:nowrap;color:var(--muted);font-size:11px}
+.admin-shell{max-width:1680px;width:calc(100% - 48px);grid-template-columns:216px minmax(0,1fr);gap:28px;margin-inline:auto}
+.admin-content{max-width:none;width:100%}
+.admin-sidebar{top:88px;height:calc(100vh - 104px);overflow-y:auto;padding:24px 12px 20px 0;scrollbar-width:thin}
+.admin-sidebar>.eyebrow{padding:9px 12px 8px;font-size:10px;letter-spacing:1.2px}
+.admin-sidebar>.admin-nav-group{margin-top:12px;border-top:1px solid var(--line);padding-top:19px}
+.admin-sidebar>a{padding:9px 12px;margin:1px 0;font-size:12px;line-height:1.3}
+.admin-sidebar>a.active{background:color-mix(in srgb,var(--accent) 14%,var(--panel));box-shadow:inset 3px 0 var(--accent-strong);font-weight:600}
+.admin-header{padding:30px 0 24px}.admin-header h1{font-size:30px;margin:6px 0}
+@media(max-width:1100px){.admin-shell{grid-template-columns:188px minmax(0,1fr);gap:20px}}
+@media(max-width:760px){.admin-shell{width:calc(100% - 28px);display:block}.admin-sidebar{position:static;height:auto;overflow:visible;display:flex;flex-direction:row;flex-wrap:nowrap;overflow-x:auto;padding:10px 0 14px;gap:4px}.admin-sidebar>.eyebrow,.admin-sidebar>.admin-nav-group,.sidebar-bottom{display:none}.admin-sidebar>a{white-space:nowrap;padding:8px 10px;flex:0 0 auto}.admin-header{padding:20px 0}}
 @media(min-width:1001px){.task-row{grid-template-columns:minmax(180px,1fr) 90px 130px 125px 112px}}
 @media(max-width:1000px){.task-row .record-main{padding-right:110px}}

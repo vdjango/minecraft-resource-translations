@@ -62,10 +62,16 @@ class MirrorObservation:
     async def snapshot(self):
         async with self.mirror.db.execute('SELECT body FROM mirror_jobs ORDER BY id DESC LIMIT 12') as cursor:
             history = [json.loads(row['body']) for row in await cursor.fetchall()]
+        async with self.mirror.db.execute('SELECT COUNT(*) count FROM mirror_failed_files') as cursor:
+            failed_count = (await cursor.fetchone())['count']
+        async with self.mirror.db.execute(
+                'SELECT url,category,status,error,attempts,last_failed FROM mirror_failed_files ORDER BY last_failed DESC LIMIT 8') as cursor:
+            failed_files = [dict(row) for row in await cursor.fetchall()]
         now = time.time()
         active = [dict(url=url, **row, speed=row['bytes'] / max(now-row['started_at'], .1))
                   for url, row in list(self.transfers.items())[:16]]
         return dict(transfers=active, history=history,
+                    failed_queue=dict(count=failed_count, files=failed_files),
                     source_scanning=bool(self.mirror.source_job and not self.mirror.source_job.done()),
                     source_scan=dict(self.mirror.source_scan_state),
                     reserved_bytes=self.mirror.reserved, observed_at=now)

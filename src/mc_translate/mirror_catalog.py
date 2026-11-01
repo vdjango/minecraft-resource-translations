@@ -195,7 +195,8 @@ class Inventory:
                                 index['priority'] = max(index['priority'], indices[index['url']]['priority'])
                             indices[index['url']] = index
                     except Exception as exc:
-                        self.errors.append(dict(url=v['url'], error=type(exc).__name__))
+                        self.errors.append(dict(url=v['url'], status=getattr(exc, 'status', None),
+                                                error=str(exc)[:180] or type(exc).__name__))
                     finally:
                         self.done += 1
                         self.progress = dict(phase='versions', done=self.done, total=self.versions)
@@ -217,7 +218,8 @@ class Inventory:
                             self.add(dict(sha1=sha, size=item['size']), 'assets',
                                      f'https://resources.download.minecraft.net/{sha[:2]}/{sha}')
                     except Exception as exc:
-                        self.errors.append(dict(url=index['url'], error=type(exc).__name__))
+                        self.errors.append(dict(url=index['url'], status=getattr(exc, 'status', None),
+                                                error=str(exc)[:180] or type(exc).__name__))
             self.progress = dict(phase='assets', total=len(indices))
             state['indices'].update(previous.get('indices', {}))
             await asyncio.gather(*(assets(index) for index in indices.values()))
@@ -239,10 +241,12 @@ class Inventory:
                                     for kind, download in file.get('downloads', {}).items():
                                         self.add(download, 'java-' + kind)
                             except Exception as exc:
-                                self.errors.append(dict(url=item['url'], error=type(exc).__name__))
+                                self.errors.append(dict(url=item['url'], status=getattr(exc, 'status', None),
+                                                        error=str(exc)[:180] or type(exc).__name__))
                     await asyncio.gather(*(java(item) for item in manifests.values()))
                 except Exception as exc:
-                    self.errors.append(dict(url=JAVA, error=type(exc).__name__))
+                    self.errors.append(dict(url=JAVA, status=getattr(exc, 'status', None),
+                                            error=str(exc)[:180] or type(exc).__name__))
         report = self.report()
         report.update(incremental=bool(previous), changed_versions=changed_versions)
         # A failed refresh must not replace a verified catalogue used by prefetch.

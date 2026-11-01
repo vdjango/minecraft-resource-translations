@@ -1,5 +1,6 @@
 """Small, staggered transfer samples. Redirects never reveal client throughput."""
 import asyncio
+import math
 import random
 import re
 import time
@@ -33,7 +34,10 @@ def assessment(samples, settings, now=None):
         grade = ('excellent' if success >= .98 and speed >= settings['quality_fast_kibps'] * 1024
                  else 'good' if success >= .90 and speed >= settings['quality_slow_kibps'] * 1024
                  else 'poor')
-    return dict(grade=grade, samples=len(attempts), days=days, success_rate=success,
+    speed_kib = speed / 1024 if speed is not None else 0
+    speed_tier = min(7, max(0, math.floor(math.log2(speed_kib / 64)) + 1)) if speed_kib >= 64 else 0
+    score = round(min(100, speed_tier * 10 + (success or 0) * 30)) if mature else None
+    return dict(grade=grade, score=score, speed_tier=speed_tier, samples=len(attempts), days=days, success_rate=success,
                 speed_bps=speed, last_at=last, missing=sum(r['outcome'] == 'missing' for r in rows),
                 cache_priority=grade in ('good', 'poor'))
 
