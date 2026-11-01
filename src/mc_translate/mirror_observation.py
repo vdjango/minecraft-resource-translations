@@ -90,7 +90,9 @@ class MirrorObservation:
         if cursor:
             where.append('(c.fetched,c.url)<(?,?)')
             args.extend(cursor)
-        sql = f'SELECT c.*, {expression} category FROM cache c LEFT JOIN expected e ON e.url=c.url'
+        sql = (f'SELECT c.*, {expression} category, o.local local, '
+               "(SELECT GROUP_CONCAT(profile, ', ') FROM object_locations l WHERE l.scope='mirror' AND l.digest=c.object AND l.state='ready') cloud_profiles "
+               'FROM cache c LEFT JOIN expected e ON e.url=c.url LEFT JOIN objects o ON o.digest=c.object')
         if where:
             sql += ' WHERE '+' AND '.join(where)
         async with self.mirror.db.execute(sql+' ORDER BY c.fetched DESC,c.url DESC LIMIT 51', args) as result:
@@ -112,7 +114,7 @@ async def room_files(cache, data):
         args.extend([query.lower()] * 3)
     sql = '''SELECT f.digest,MIN(f.path) path,MAX(f.size) size,MAX(f.touched) touched,
         MAX(f.lease_until) expires_at,MAX(f.need) needed,MAX(f.reason) reason,
-        MAX(o.size) stored_bytes,COUNT(DISTINCT f.scope) references_count
+        MAX(o.size*o.local) stored_bytes,COUNT(DISTINCT f.scope) references_count
         FROM files f LEFT JOIN objects o ON o.digest=f.digest'''
     if where:
         sql += ' WHERE '+' AND '.join(where)
@@ -124,8 +126,18 @@ async def room_files(cache, data):
         rows = [dict(row) for row in await result.fetchall()]
     more, now = len(rows) > 50, time.time()
     rows = rows[:50]
+    locations = {}
+    if rows:
+        digests = [row['digest'] for row in rows]
+        marks = ','.join('?' for _ in digests)
+        async with cache.mirror.db.execute(
+            "SELECT digest,GROUP_CONCAT(profile, ', ') profiles FROM object_locations "
+            f"WHERE scope='room' AND state='ready' AND digest IN ({marks}) GROUP BY digest", digests
+        ) as cursor:
+            locations = {row['digest']: row['profiles'] for row in await cursor.fetchall()}
     for row in rows:
         digest = row['digest']
+        row['cloud_profiles'] = locations.get(digest)
         row['state'] = ('uploading' if digest in cache.uploading else 'cached' if row['stored_bytes'] is not None
                         else 'expired' if row['expires_at'] and row['expires_at'] <= now
                         else 'awaiting_upload' if row['needed'] else 'redirect')

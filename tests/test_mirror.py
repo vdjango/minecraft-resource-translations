@@ -217,7 +217,7 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         settings = read_settings(self.config)
         settings.update(quota_gib=1, eviction='lru', protect_latest=0)
         rows = [(f'{i:064x}', 4*1024**2, i, 0) for i in range(300)]
-        await self.mirror.db.executemany('INSERT INTO objects VALUES(?,?,?,?)', rows)
+        await self.mirror.db.executemany('INSERT INTO objects(digest,size,accessed,priority) VALUES(?,?,?,?)', rows)
         await self.mirror.db.execute('UPDATE totals SET bytes=?', (300*4*1024**2,))
         await self.mirror.db.commit()
         self.mirror.serving[rows[0][0]] = 1

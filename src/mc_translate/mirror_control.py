@@ -1,6 +1,7 @@
 """Small management bridge. Bulk bytes never pass through the translation app."""
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
@@ -32,12 +33,15 @@ class MirrorControl:
             token = await asyncio.to_thread(token_path.read_text, encoding='ascii')
             async with self.http.request('POST' if body else 'GET',
                                          f'http://127.0.0.1:{self.config.mirror_port}/_internal/control',
-                                         headers={'X-Mirror-Control': token.strip()}, json=body) as response:
+                                         headers={'X-Mirror-Control': token.strip()}, json=body,
+                                         timeout=ClientTimeout(total=30 if body and body.get('action') in ('cloud_migrate', 'cloud_test') else 3)) as response:
                 if response.status != 200:
                     if response.status == 409:
                         raise web.HTTPConflict(text='mirror_job_running')
                     if response.status == 507:
                         raise ValueError('cache quota is below active downloads or protected versions')
+                    if response.status == 400:
+                        raise ValueError((await response.text())[:200])
                     return None
                 return await response.json()
         except (ClientError, asyncio.TimeoutError, OSError):
@@ -51,7 +55,7 @@ class MirrorControl:
             if not isinstance(data, dict):
                 raise ValueError('expected a JSON object')
             if 'action' in data:
-                if data['action'] not in ('inventory', 'prefetch', 'cancel', 'refresh', 'source_scan', 'source_files', 'source_preview', 'source_cleanup', 'quality_probe', 'quality_history', 'cache_files', 'room_files'):
+                if data['action'] not in ('inventory', 'prefetch', 'cancel', 'refresh', 'source_scan', 'source_files', 'source_preview', 'source_cleanup', 'quality_probe', 'quality_history', 'cache_files', 'room_files', 'cloud_migrate', 'cloud_retry', 'cloud_probe', 'cloud_test'):
                     raise ValueError('invalid mirror action')
                 arguments = dict(action=data['action'])
                 if data['action'] in ('cache_files', 'room_files'):
@@ -68,6 +72,21 @@ class MirrorControl:
                     if len(source)>64 or not 0<=offset<=30000:
                         raise ValueError('invalid source pagination')
                     arguments.update(source=source,offset=offset)
+                if data['action'] == 'cloud_migrate':
+                    route, limit = str(data.get('route', '')), data.get('limit', 20)
+                    if route not in read_settings(self.config)['qiniu_routes'] or type(limit) is not int or not 1 <= limit <= 200:
+                        raise ValueError('invalid cloud migration selection')
+                    arguments.update(route=route, limit=limit)
+                if data['action'] == 'cloud_retry':
+                    job_id = data.get('job_id')
+                    if type(job_id) is not int or job_id <= 0:
+                        raise ValueError('invalid cloud job')
+                    arguments['job_id'] = job_id
+                if data['action'] in ('cloud_probe', 'cloud_test'):
+                    profile = str(data.get('profile', ''))
+                    if profile not in {item['id'] for item in read_settings(self.config)['qiniu_profiles']}:
+                        raise ValueError('invalid cloud profile')
+                    arguments['profile'] = profile
                 result = await self.call(arguments)
                 if result is None:
                     return web.json_response(dict(code='mirror_offline'), status=503)
@@ -76,6 +95,7 @@ class MirrorControl:
             if isinstance(data.get('policies'), dict):
                 data['policies'] = {**previous['policies'], **data['policies']}
             values = validate_settings({**previous, **data})
+            await asyncio.to_thread(self._protect_cloud_locations, values)
             await asyncio.to_thread(write_json, settings_path(self.config), values)
             try:
                 await self.call(dict(action='trim'))
@@ -95,6 +115,21 @@ class MirrorControl:
             status['inventory'] = await asyncio.to_thread(report)
             status['selection'] = inventory_selection(status['inventory'], status['settings']['policies'])
         return web.json_response(status)
+
+    def _protect_cloud_locations(self, values):
+        database = Path(self.config.mirror_root) / 'mirror.sqlite3'
+        if not database.exists():
+            return
+        with sqlite3.connect(f'file:{database.as_posix()}?mode=ro', uri=True) as connection:
+            try:
+                used = {row[0] for row in connection.execute("SELECT DISTINCT profile FROM object_locations WHERE state='ready'")}
+            except sqlite3.OperationalError:
+                return
+        before = {item['id']: item for item in read_settings(self.config, effective=False)['qiniu_profiles']}
+        after = {item['id']: item for item in values['qiniu_profiles']}
+        for profile in used:
+            if profile not in before or profile not in after or any(before[profile][key] != after[profile][key] for key in ('bucket', 'domain', 'prefix', 'private', 'upload_host')):
+                raise ValueError('A Qiniu profile holding files cannot be removed or repointed; add a new profile instead')
 
     async def status(self, request):
         result = await self.call()

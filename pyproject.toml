@@ -15,6 +15,7 @@ dependencies = ["aiohttp>=3.11,<4", "aiosqlite>=0.21,<1", "bleach>=6.2,<7", "jso
 [project.optional-dependencies]
 build = ["pyinstaller>=6.10,<7"]
 windows = ["pywin32>=306; platform_system == 'Windows'"]
+qiniu = ["qiniu>=7.18,<8"]
 
 [project.scripts]
 mc-translate = "mc_translate.__main__:main"
