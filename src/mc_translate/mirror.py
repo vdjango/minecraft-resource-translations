@@ -484,7 +484,7 @@ class Mirror:
             raise web.HTTPBadGateway(text=f'主源失败：{initial[:100]}；替代来源也失败：{"; ".join(failures)[:220]}') from original
         return None
 
-    async def download(self, url, fetch_url=None):
+    async def download(self, url, fetch_url=None, allow_alternates=True):
         if not allowed_url(url):
             raise web.HTTPNotFound()
         settings = read_settings(self.config)
@@ -570,7 +570,7 @@ class Mirror:
                     logging.exception('Cloud copy could not be queued; local file remains available')
                 return await self.cached(url)
         except web.HTTPException as exc:
-            if fetch_url is None and reservation == 0 and exc.status in (404, 502):
+            if fetch_url is None and allow_alternates and reservation == 0 and exc.status in (404, 502):
                 alternate = await self.alternate_download(url, settings, exc)
                 if alternate is not None:
                     return alternate
@@ -578,7 +578,7 @@ class Mirror:
         except (ClientError, asyncio.TimeoutError) as exc:
             if old:
                 return old
-            if fetch_url is None and reservation == 0:
+            if fetch_url is None and allow_alternates and reservation == 0:
                 alternate = await self.alternate_download(url, settings, exc)
                 if alternate is not None:
                     return alternate
@@ -589,22 +589,23 @@ class Mirror:
             async with self.space_lock:
                 self.reserved -= reservation
 
-    async def ensure(self, url):
+    async def ensure(self, url, *, allow_alternates=True):
         old = await self.cached(url)
         mutable = mutable_metadata(url)
         if old and (not mutable or time.time() - old['fetched'] < read_settings(self.config)['metadata_ttl']):
             return old
-        if url not in self.inflight:
+        key = (url, allow_alternates)
+        if key not in self.inflight:
             if len(self.inflight) >= read_settings(self.config)['concurrency']:
                 raise web.HTTPServiceUnavailable(headers={'Retry-After': '3'}, text='Download queue busy')
-            task = asyncio.create_task(self.download(url))
-            self.inflight[url] = task
+            task = asyncio.create_task(self.download(url, allow_alternates=allow_alternates))
+            self.inflight[key] = task
             def finished(task):
-                self.inflight.pop(url, None)
+                self.inflight.pop(key, None)
                 if not task.cancelled():
                     task.exception()
             task.add_done_callback(finished)
-        return await asyncio.shield(self.inflight[url])
+        return await asyncio.shield(self.inflight[key])
 
     def backup(self, url):
         """A small bounded task set; never wait for a backup before redirecting."""
@@ -671,7 +672,7 @@ class Mirror:
         direct = request.path.startswith('/_mirror_node/')
         path = request.path[len('/_mirror_node'):] if direct else request.path
         urls = upstreams(path)
-        mapped_targets = [] if own_origin_only else source_targets(settings,path,'redirect')
+        mapped_targets = [] if own_origin_only or direct else source_targets(settings,path,'redirect')
         if not urls and not mapped_targets:
             raise web.HTTPNotFound()
         category = 'java' if path.startswith('/java/') else await self.category(urls[0]) if urls else 'libraries'
@@ -730,7 +731,7 @@ class Mirror:
             })
         if not fallback:
             try:
-                item = await self.ensure(urls[0])
+                item = await self.ensure(urls[0], allow_alternates=not (direct or own_origin_only))
             except (web.HTTPNotFound, web.HTTPInsufficientStorage, web.HTTPServiceUnavailable, web.HTTPBadGateway, web.HTTPRequestEntityTooLarge, OSError) as exc:
                 if own_origin_only:
                     raise web.HTTPServiceUnavailable(text='Buggcraft 源站暂时无法取得文件，不会重定向到第三方来源。',

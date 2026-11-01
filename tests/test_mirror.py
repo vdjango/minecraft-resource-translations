@@ -116,6 +116,25 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(seen), 2)
         self.assertIn('/_mirror_node' + path, seen[1])
 
+    async def test_peer_request_never_hops_to_another_source(self):
+        path = self.asset()
+        url = upstreams(path)[0]
+        settings = read_settings(self.config)
+        settings['sources'] = [dict(prefix=path, target='https://verified.example' + path,
+                                    mode='redirect', enabled=True)]
+        write_json(settings_path(self.config), validate_settings(settings))
+        seen = []
+        def get(target, **kw):
+            seen.append(str(target))
+            return self.http.get(self.origin.make_url(
+                '/missing' if str(target) == url else '/data'), **kw)
+        self.mirror.http.get = get
+        with patch.object(self.mirror, 'select_node', return_value='https://other-peer.example'):
+            response = await self.client.get('/_mirror_node' + path, allow_redirects=False)
+        self.assertEqual(response.status, 307)
+        self.assertEqual(response.headers['Location'], url)
+        self.assertEqual(seen, [url])
+
     async def test_pack_and_resource_zip_routes_use_origin_bytes(self):
         routes = {
             '/mods/modrinth/data/project/versions/release/pack.mrpack':
