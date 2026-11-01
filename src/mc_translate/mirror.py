@@ -26,6 +26,7 @@ from .federation import origin, PublicResolver
 from .mirror_sources import BUILTIN_SOURCES, SourceDiscovery, effective_sources, source_status, validate_registries
 from .mirror_source_management import SourceManagement
 from .mirror_quality import QUALITY_DEFAULTS, SourceQuality
+from .mirror_observation import MirrorObservation, room_files
 from .room_cache import RoomCache, DEFAULTS as ROOM_CACHE_DEFAULTS, validate_settings as validate_room_cache
 
 GIB = 1024 ** 3
@@ -208,6 +209,7 @@ class Mirror:
         self.scheduler = None
         self.discovery = SourceDiscovery(self.root)
         self.source_job = None
+        self.source_scan_state = dict(state='idle')
         self.next_refresh = None
         self.last_refresh = None
         self.job_state = dict(state='idle')
@@ -216,6 +218,7 @@ class Mirror:
         self.token_path = self.root / 'control-token'
         self.sources = SourceManagement(self)
         self.quality = SourceQuality(self)
+        self.observation = MirrorObservation(self)
         self.room_cache = RoomCache(self, lambda: read_settings(self.config))
 
     async def open(self):
@@ -250,6 +253,7 @@ class Mirror:
             await self.db.execute('INSERT OR IGNORE INTO objects(digest,size,accessed) SELECT object,MAX(size),MAX(fetched) FROM cache GROUP BY object')
             await self.db.execute('INSERT INTO totals VALUES(1,(SELECT COALESCE(SUM(size),0) FROM objects),(SELECT COUNT(*) FROM cache))')
         await self.db.commit()
+        await self.observation.open()
         await self.sources.open()
         await self.quality.open()
         self.egress = Egress(self.db)
@@ -306,6 +310,7 @@ class Mirror:
                     source_statistics=await self.sources.summary(),
                     source_quality=await self.quality.snapshot(),
                     room_client_cache=await self.room_cache.snapshot(),
+                    operations=await self.observation.snapshot(),
                     egress=await self.egress.snapshot(settings),
                     accepting=not await self.egress.reason(1, settings, sum(self.serving.values())),
                     nodes=[dict(n, healthy=self.node_health.get(n['url'], {}).get('healthy', False)) for n in settings['nodes']],
@@ -426,6 +431,8 @@ class Mirror:
             sha1 = url.rsplit('/', 1)[1]
         part = self.root / 'tmp' / (secrets.token_hex(16) + '.part')
         reservation = 0
+        progress = dict(bytes=0, total=None, started_at=time.time())
+        self.observation.transfers[url] = progress
         try:
             async with self.http.get(url, allow_redirects=False) as response:
                 if response.status == 404:
@@ -433,6 +440,7 @@ class Mirror:
                 if response.status != 200 or response.headers.get('Content-Encoding', 'identity') != 'identity':
                     raise web.HTTPBadGateway(text='Upstream response unavailable; redirects are not followed.')
                 size = response.content_length
+                progress['total'] = size
                 if size is not None and size > 2 * GIB:
                     raise web.HTTPRequestEntityTooLarge(max_size=2 * GIB, actual_size=size)
                 async with self.space_lock:
@@ -450,6 +458,7 @@ class Mirror:
                 with part.open('wb') as file:
                     async for chunk in response.content.iter_chunked(256 * 1024):
                         written += len(chunk)
+                        progress['bytes'] = written
                         if written > reservation or written > 2 * GIB:
                             raise web.HTTPBadGateway(text='Upstream size mismatch')
                         h1.update(chunk)
@@ -487,6 +496,7 @@ class Mirror:
                 return old
             raise web.HTTPBadGateway(text='Official upstream temporarily unavailable') from exc
         finally:
+            self.observation.transfers.pop(url, None)
             part.unlink(missing_ok=True)
             async with self.space_lock:
                 self.reserved -= reservation
@@ -695,6 +705,12 @@ class Mirror:
             if not isinstance(data, dict):
                 raise web.HTTPBadRequest(text='Expected a JSON object')
             action = data.get('action')
+            if action in ('cache_files', 'room_files'):
+                try:
+                    result = await (self.observation.files(data) if action == 'cache_files' else room_files(self.room_cache, data))
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(result, headers={'Cache-Control': 'no-store'})
             if action == 'quality_probe':
                 await self.quality.schedule(data.get('source'))
                 return web.json_response(await self.status(compact=True))
@@ -721,13 +737,21 @@ class Mirror:
             elif action in ('inventory', 'prefetch', 'refresh', 'source_cleanup'):
                 if self.job and not self.job.done():
                     raise web.HTTPConflict(text='A mirror job is already running')
-                self.job_state = dict(state='running', action=action, started_at=time.time())
+                self.job_state = dict(state='running', action=action, trigger='manual', started_at=time.time())
                 self.job = asyncio.create_task(self.run_job(action))
             else:
                 raise web.HTTPBadRequest()
         return web.json_response(await self.status(compact=True), headers={'Cache-Control': 'no-store'})
 
     async def run_job(self, action):
+        await self.observation.record()
+        try:
+            await self._run_job(action)
+        finally:
+            self.job_state['finished_at'] = time.time()
+            await self.observation.record()
+
+    async def _run_job(self, action):
         try:
             if action=='source_cleanup':
                 await self.sources.cleanup()
@@ -855,20 +879,23 @@ class Mirror:
                 if scheduled_interval != interval or self.next_refresh is None:
                     scheduled_interval, self.next_refresh = interval, time.time() + interval
                 if time.time() >= self.next_refresh and (not self.job or self.job.done()):
-                    self.job_state = dict(state='running', action='refresh', started_at=time.time())
+                    self.job_state = dict(state='running', action='refresh', trigger='scheduled', started_at=time.time())
                     self.job = asyncio.create_task(self.run_job('refresh'))
                     self.next_refresh = time.time() + interval
             await asyncio.sleep(5)
 
     async def discover_sources(self):
+        self.source_scan_state = dict(state='running', started_at=time.time())
         try:
             await self.discovery.refresh()
             await self.sources.synchronize()
             await self.sources.flush()
+            self.source_scan_state.update(state='finished', finished_at=time.time())
             if read_settings(self.config)['source_cleanup'] and (not self.job or self.job.done()):
                 self.job_state = dict(state='running',action='source_cleanup',started_at=time.time())
                 self.job = asyncio.create_task(self.run_job('source_cleanup'))
-        except Exception:
+        except Exception as exc:
+            self.source_scan_state.update(state='failed', finished_at=time.time(), error=str(exc)[:160])
             logging.exception('Automatic source discovery will retry')
 
 

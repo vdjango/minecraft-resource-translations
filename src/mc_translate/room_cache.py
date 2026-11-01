@@ -149,6 +149,7 @@ class RoomCache:
         self.root = mirror.root / 'room-content'
         self.lock = asyncio.Lock()
         self.uploading, self.serving = set(), {}
+        self.upload_progress = {}
         self.reserved = 0
 
     async def open(self):
@@ -166,6 +167,7 @@ class RoomCache:
                 PRIMARY KEY(scope,digest));
             CREATE INDEX IF NOT EXISTS files_age ON files(touched);
             CREATE INDEX IF NOT EXISTS files_sha1 ON files(sha1);
+            CREATE INDEX IF NOT EXISTS files_digest ON files(digest);
             CREATE TABLE IF NOT EXISTS objects(digest TEXT PRIMARY KEY, size INTEGER, created REAL);
             CREATE TABLE IF NOT EXISTS sources(host TEXT PRIMARY KEY, url TEXT, checked REAL DEFAULT 0,
                 speed REAL DEFAULT 0, bad INTEGER DEFAULT 0, samples INTEGER DEFAULT 0, touched REAL);
@@ -346,11 +348,13 @@ class RoomCache:
             self.uploading.add(digest)
             self.reserved += size
         temp = self.root / 'tmp' / (secrets.token_hex(12) + '.part')
+        self.upload_progress[digest] = 0
         try:
             count, sha256, sha1 = 0, hashlib.sha256(), hashlib.sha1()
             with temp.open('xb') as output:
                 async for chunk in request.content.iter_chunked(128 * 1024):
                     count += len(chunk)
+                    self.upload_progress[digest] = count
                     if count > size:
                         raise web.HTTPBadRequest(text='文件大小不匹配。')
                     sha256.update(chunk)
@@ -367,6 +371,7 @@ class RoomCache:
         finally:
             temp.unlink(missing_ok=True)
             self.uploading.discard(digest)
+            self.upload_progress.pop(digest, None)
             self.reserved -= size
 
     async def download(self, request):

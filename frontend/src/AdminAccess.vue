@@ -12,8 +12,11 @@ let setupToken=setupPage?location.hash.slice(1):'';
 let accessRevision=0;
 if(setupToken){history.replaceState(null,'',location.pathname+location.search);}
 async function request(url:string,init:RequestInit={}){
-  const response=await fetch(url,{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(6000),...init});
-  const data=await response.json();
+  let response:Response;
+  try{response=await fetch(url,{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(6000),...init});}
+  catch{throw new Error('无法连接登录服务，请检查网络后重试。');}
+  let data:Record<string,any>={};
+  try{data=await response.json();}catch{if(response.ok)throw new Error('登录服务返回异常，请稍后重试。');}
   if(!response.ok){const error=new Error(data.error||({unauthorized:'用户名或密码错误。',invalid_setup:'初始化链接无效或已使用。',invalid_credentials:'请检查用户名、密码和确认密码。'} as Record<string,string>)[data.code]||'请求未完成，请稍后重试。');Object.assign(error,{status:response.status});throw error;}
   return data;
 }
@@ -55,8 +58,8 @@ onBeforeUnmount(()=>{accessRevision++;});
   <section v-if="visible" class="admin-access" aria-labelledby="access-title">
     <div class="access-symbol" aria-hidden="true">B<span>·</span></div>
     <p class="access-eyebrow">{{setup?'FIRST TIME SETUP':'ADMINISTRATOR'}}</p>
-    <h2 id="access-title">{{setup?'设置管理员账户':'登录管理工作台'}}</h2>
-    <p class="access-intro">{{setup?'由你设置用户名和密码，保存后即可进入后台。初始化链接仅能使用一次。':'使用此服务的管理员账户，管理会话会在页面间自动保留。'}}</p>
+    <h1 id="access-title">{{setup?'设置管理员账户':'登录'}}</h1>
+    <p class="access-intro">{{setup?'设置用户名和密码，开始使用管理后台。':'登录 Buggcraft 管理后台'}}</p>
     <div v-if="setup&&!setupToken" class="access-note">请使用安装程序提供的完整初始化链接。忘记密码时，在服务器生成新的账户设置链接。</div>
     <form @submit.prevent="submit" method="post" autocomplete="on">
       <template v-if="!legacy||setup">
@@ -66,7 +69,7 @@ onBeforeUnmount(()=>{accessRevision++;});
       </template>
       <label v-else>现有管理员令牌<input v-model="token" type="password" autocomplete="off" required placeholder="输入服务端管理令牌"></label>
       <p v-if="error" class="access-error" role="alert">{{error}}</p>
-      <button class="primary access-submit" type="submit" :disabled="busy||(setup&&!setupToken)">{{busy?'正在安全保存…':setup?'保存账户并进入后台':'登录工作台 →'}}</button>
+      <button class="primary access-submit" type="submit" :disabled="busy||(setup&&!setupToken)">{{busy?(setup?'正在保存…':'正在登录…'):setup?'保存并继续':'登录'}}</button>
     </form>
     <p v-if="notice" class="access-note" role="status">{{notice}} <button type="button" class="access-link" @click="restore">重试</button></p>
     <p class="access-footnote">{{setup?'密码仅保存为加密摘要，请自行妥善保管。':'忘记密码？使用服务器的账户恢复命令，重新设置后再登录。'}}</p>

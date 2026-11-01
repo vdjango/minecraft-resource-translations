@@ -12,7 +12,7 @@ describe('administrator session restoration',()=>{
     const host=document.createElement('div');document.body.append(host);
     app=createApp(AdminAccess,{visible:true,options:{mode:'setup',session:'/session',login:'/login',setup:'/setup',authorized:vi.fn()}});
     app.mount(host);await nextTick();
-    expect(host.querySelector('h2')?.textContent).toBe('设置管理员账户');
+    expect(host.querySelector('h1')?.textContent).toBe('设置管理员账户');
     expect(host.querySelector('input[name="password_confirm"]')).not.toBeNull();
     expect((host.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(false);
     expect(location.hash).toBe('');expect(fetch).not.toHaveBeenCalled();
