@@ -128,7 +128,7 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get(path)
         self.assertEqual(response.status, 200)
         self.assertEqual(await response.read(), self.payload)
-        for bad in ('/mods/https://evil.com/file.jar', '/mods/modrinth/data/a/versions/b/file.zip',
+        for bad in ('/mods/https://evil.com/file.jar', '/mods/modrinth/data/a/versions/b/file.txt',
                     '/mods/curseforge/files/1/2/file.jar?url=https://evil.com'):
             self.assertIn((await self.client.get(bad)).status, (400, 404))
 
