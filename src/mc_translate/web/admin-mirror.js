@@ -16,10 +16,41 @@ function renderRoomCache(data,fill){
   $('room-cache-sources').replaceChildren(...(state.sources||[]).map(source=>row([source.host,source.samples?source.speed.toFixed(0)+' KiB/s':'观察中',source.bad+' / '+source.samples,qualityTime(source.checked)])));
 }
 function mirrorRules(domain){
-  const host=new URL(domain).hostname;
-  const paths=['/_mirror_node/','/mc/game/','/v1/packages/','/v1/objects/','/v1/products/java-runtime/','/java/','/mods/','/maven/','/fabric-meta/','/fabric-maven/','/neoforge-maven/','/quilt-meta/','/quilt-maven/','/mirrors/authlib-injector/'];
-  $('mirror-cf-expression').textContent=`(http.host eq "${host}" and http.request.method in {"GET" "HEAD"} and (${paths.map(p=>`starts_with(http.request.uri.path, "${p}")`).join(' or ')} or (starts_with(http.request.uri.path, "/assets/") and not (ends_with(http.request.uri.path, ".js") or ends_with(http.request.uri.path, ".css") or ends_with(http.request.uri.path, ".html")))))`;
-  $('mirror-cf-bypass').textContent=`(http.host eq "${host}" and (starts_with(http.request.uri.path, "/admin") or starts_with(http.request.uri.path, "/v1/admin/") or (starts_with(http.request.uri.path, "/v1/") and not (starts_with(http.request.uri.path, "/v1/packages/") or starts_with(http.request.uri.path, "/v1/objects/") or starts_with(http.request.uri.path, "/v1/products/java-runtime/"))) or starts_with(http.request.uri.path, "/room-cache/") or starts_with(http.request.uri.path, "/mirror-api/") or http.cookie contains "translation_admin=" or any(http.request.headers["authorization"][*] ne "")))`;
+  const siteHosts=['bugg.icu','download.bugg.icu','node.bugg.icu','translate.bugg.icu'];
+  const mirrorHosts=['mirror.bugg.icu','mirror2.bugg.icu'];
+  const activeHost=new URL(domain).hostname;
+  if(!siteHosts.includes(activeHost) && !mirrorHosts.includes(activeHost))mirrorHosts.push(activeHost);
+  const allHosts=siteHosts.concat(mirrorHosts);
+  const hostSet=items=>items.map(item=>JSON.stringify(item)).join(' ');
+  const prefix=path=>'starts_with(http.request.uri.path, '+JSON.stringify(path)+')';
+  const mirrorPaths=['/assets/','/mc/game/','/java/v1/','/v1/packages/','/v1/objects/',
+    '/v1/products/java-runtime/','/maven/','/fabric-meta/','/quilt-meta/',
+    '/fabric-maven/','/quilt-maven/','/neoforge-maven/',
+    '/mirrors/authlib-injector/','/mods/','/_mirror_node/'];
+  const privatePaths=['/api/','/v1/','/admin','/login','/account','/network',
+    '/developers','/setup','/room-cache/','/mirror-api/','/_internal/'];
+  $('mirror-cf-static').textContent=[
+    '(',
+    '  http.host in {'+hostSet(allHosts)+'}',
+    '  and http.request.uri.path.extension in {"js" "css" "png" "jpg" "jpeg" "webp" "avif" "svg" "ico" "woff" "woff2"}',
+    '  and not '+prefix('/api/'),
+    '  and not '+prefix('/v1/'),
+    ')',
+  ].join('\n');
+  $('mirror-cf-bypass').textContent=[
+    '(',
+    '  http.host in {'+hostSet(allHosts)+'}',
+    '  and ('+privatePaths.map(prefix).join(' or\n    ')+')',
+    ')',
+  ].join('\n');
+  $('mirror-cf-expression').textContent=[
+    '(',
+    '  (http.host eq "download.bugg.icu" and '+prefix('/admin/assets/')+')',
+    '  or (http.host in {'+hostSet(mirrorHosts)+'} and (',
+    '    '+mirrorPaths.map(prefix).join(' or\n    '),
+    '  ))',
+    ')',
+  ].join('\n');
 }
 let mirrorLoaded=false;
 function renderMirror(data,fill=false){
