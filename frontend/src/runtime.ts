@@ -1,6 +1,17 @@
-import { createApp, defineComponent, onMounted, onBeforeUnmount, h, reactive, type Component } from 'vue';
+import { createApp, defineComponent, onMounted, onBeforeUnmount, h, reactive, ref, type Component } from 'vue';
+import {createPinia} from 'pinia';
+import {createRouter,createWebHistory,RouterView,type RouteRecordRaw} from 'vue-router';
 import { createViews } from './views';
 import { capturePageSeed } from './pageSeed';
+import {platformRoute,platformRoutes} from './platformRoutes';
+import {adminSession} from './views';
+import SiteNav from './SiteNav.vue';
+import ProductLinks from './ProductLinks.vue';
+import {configurePublicSeo,isMirrorHome,updatePageMetadata} from './publicSeo';
+import AdminNav from './AdminNav.vue';
+import ToastNotifications from './ToastNotifications.vue';
+declare const __PLATFORM_BUILD_REVISION__:string;
+const buildRevision=typeof __PLATFORM_BUILD_REVISION__==='string'?__PLATFORM_BUILD_REVISION__:'dev';
 
 export type PageScope = ReturnType<typeof createScope>;
 export function createScope() {
@@ -15,6 +26,7 @@ export function createScope() {
   const pending = () => window.dispatchEvent(new CustomEvent('buggcraft:page-pending',{detail:state.pending}));
   const scope = {
     state,
+    get active(){return active;},
     setTimeout(handler: TimerHandler, delay?: number, ...args: unknown[]): number {
       const id = window.setTimeout(() => { timers.delete(id); if(active && typeof handler === 'function') handler(...args); }, delay);
       timers.add(id); return id;
@@ -31,7 +43,7 @@ export function createScope() {
       const supplied=init.signal||(input instanceof Request?input.signal:undefined);
       const signal=controller.signal;
       const forwardAbort=()=>controller.abort(supplied?.reason);
-      const deadline=window.setTimeout(()=>controller.abort(new DOMException('Request timed out','TimeoutError')),25000);
+      const deadline=supplied?undefined:window.setTimeout(()=>controller.abort(new DOMException('Request timed out','TimeoutError')),25000);
       let finished=false;
       const finish=()=>{if(!finished){finished=true;window.clearTimeout(deadline);supplied?.removeEventListener('abort',forwardAbort);controllers.delete(controller);state.pending--;pending();}};
       signal.addEventListener('abort',finish,{once:true});
@@ -74,36 +86,96 @@ export function createScope() {
   return scope;
 }
 
-/** Mount the complete visible page; server HTML remains available before JS loads. */
-export function mountPage(initialize: (scope:PageScope,views:ReturnType<typeof createViews>)=>void, Page?:Component) {
-  if(document.querySelector('[data-vue-page]'))return;
-  const seed=capturePageSeed();
-  const views=createViews();
-  const host=document.createElement('div');
-  host.className='vue-page-root'; host.dataset.vuePage='';
-  if(Page){host.style.display='contents';document.body.replaceChildren(host);}
-  else {host.hidden=true;document.body.append(host);}
-  const application=createApp(defineComponent({
-    setup() {
-      const scope=createScope();
+type Initialize=(scope:PageScope,views:ReturnType<typeof createViews>,seed:Record<string,string>)=>void;
+type PageModule={Page:Component;initialize:Initialize};
+
+function routeView(module:PageModule,seed:Record<string,string>,restore?:()=>void){
+  return defineComponent({
+    setup(){
+      const scope=createScope(),views=createViews(seed.catalogueData);
       onMounted(()=>{
-        seed.restore();
-        try{initialize(scope,views);}catch(error){
+        restore?.();
+        try{module.initialize(scope,views,seed);}catch(error){
           scope.state.error=String(error);console.error(error);
-          const feedback=document.createElement('p');feedback.setAttribute('role','alert');
-          feedback.textContent='Page initialization failed. Refresh and try again.';
-          (document.querySelector('main')||document.body).prepend(feedback);
           document.dispatchEvent(new CustomEvent('page-initialization-error',{detail:String(error)}));
         }
       });
       onBeforeUnmount(()=>{scope.dispose();views.dispose();});
-      return ()=>Page?h(Page,{seed:seed.state,views}):h('span',{'data-pending':scope.state.pending});
+      return ()=>h(module.Page,{seed,views});
+    },
+  });
+}
+
+/** Mount the Vue application into the generated browser bootstrap. */
+export function mountPage(initialize:Initialize,Page:Component,name:string){
+  if(document.querySelector('[data-vue-page]'))return;
+  const seed=capturePageSeed();
+  configurePublicSeo(seed.state);
+  const host=document.createElement('div');
+  host.className='vue-page-root';host.dataset.vuePage='';host.style.display='contents';
+  document.body.replaceChildren(host);
+  const initialView=routeView({Page,initialize},seed.state,seed.restore);
+  const initial=platformRoute(location.pathname,isMirrorHome());
+  const navigating=ref(false);
+  const views=new Map<string,Component>([[name,initialView]]);
+  async function resolve(entry:string):Promise<Component>{
+    const cached=views.get(entry);if(cached)return cached;
+    (window as Window & {__buggcraftRouteLoading?:boolean}).__buggcraftRouteLoading=true;
+    try{
+      const module=await import(/* @vite-ignore */ '/assets/vue-page-'+entry+'.js?v='+buildRevision) as PageModule;
+      const next=routeView(module,{authMode:seed.state.authMode==='legacy'?'legacy':'login',catalogue:'',serviceState:'正在连接服务…'});
+      views.set(entry,next);return next;
+    }finally{(window as Window & {__buggcraftRouteLoading?:boolean}).__buggcraftRouteLoading=false;}
+  }
+  const routes:RouteRecordRaw[]=platformRoutes.map(item=>({
+    path:item.path,component:(item.path==='/'&&isMirrorHome()?'mirror':item.entry)===name?initialView:()=>resolve(item.path==='/'&&isMirrorHome()?'mirror':item.entry),meta:{title:item.title},
+  }));
+  const router=initial&&initial.entry===name?createRouter({
+    history:createWebHistory(),routes,scrollBehavior(to,_from,saved){
+      if(saved)return saved;if(to.hash)return {el:to.hash,behavior:'smooth'};return {top:0};
+    },
+  }):null;
+  router?.beforeEach((to,from)=>{navigating.value=to.fullPath!==from.fullPath;});
+  router?.afterEach(to=>{updatePageMetadata(to.path,to.fullPath.includes('?')?to.fullPath.split('?')[1].split('#')[0]:'',String(to.meta.title||document.title));navigating.value=false;});
+  router?.onError(error=>{console.error('Route load failed',error);location.assign(location.href);});
+  function routeClick(event:MouseEvent){
+    if(!router||event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
+    const anchor=event.target instanceof Element?event.target.closest<HTMLAnchorElement>('a[href]'):null;
+    if(!anchor||anchor.hasAttribute('download')||(anchor.target&&anchor.target!=='_self'))return;
+    const destination=new URL(anchor.href,location.href);
+    const from=platformRoute(router.currentRoute.value.path),to=platformRoute(destination.pathname);
+    if(destination.origin!==location.origin||!from||!to)return;
+    // Each project response carries its own server-validated detail seed.
+    if(to.entry==='project'&&from.entry!=='project')return;
+    event.preventDefault();event.stopPropagation();
+    void router.push(destination.pathname+destination.search+destination.hash);
+  }
+  const application=createApp(defineComponent({
+    setup(){
+      if(!router)return ()=>h('div',{style:{display:'contents'}},[h(initialView),h(ToastNotifications)]);
+      return ()=>{
+        const path=router.currentRoute.value.path;
+        const admin=path==='/admin'||path.startsWith('/admin/');
+        const authenticated=adminSession.authenticated&&path!=='/admin/setup';
+        const content=h(RouterView);
+        const loading=navigating.value?h('div',{class:'route-skeleton-overlay',role:'status','aria-live':'polite'},[
+          h('p',{class:'site-load-heading'},'正在打开页面…'),
+          h('div',{class:'site-skeleton-layout','aria-hidden':'true'},Array.from({length:4},()=>h('div',{class:'site-skeleton'}))),
+        ]):null;
+        return h('div',{class:'platform-router-root',style:{display:'contents'},onClickCapture:routeClick},[
+          h(SiteNav,{authenticated}),
+          admin?h('main',{class:'admin-shell'},[h(AdminNav,{authenticated}),content,loading]):content,
+          admin?null:loading,
+          admin?null:h(ProductLinks),
+          h(ToastNotifications),
+        ]);
+      };
     },
   }));
+  application.use(createPinia());
+  if(router)application.use(router);
   application.mount(host);
   window.dispatchEvent(new Event('buggcraft:page-ready'));
-  const leave=()=>{application.unmount();host.remove();window.removeEventListener('pagehide',close);window.removeEventListener('buggcraft:before-navigate',leave);};
-  window.addEventListener('buggcraft:before-navigate',leave,{once:true});
   const close=(event:PageTransitionEvent)=>{if(!event.persisted){application.unmount();host.remove();window.removeEventListener('pagehide',close);}};
   window.addEventListener('pagehide',close);
 }

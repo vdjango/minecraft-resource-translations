@@ -1,0 +1,15 @@
+{
+  "product": "https://bugg.icu/#product",
+  "links": [
+    {"label":"Buggcraft 官网","href":"https://bugg.icu/"},
+    {"label":"镜像源","href":"https://mirror.bugg.icu/"},
+    {"label":"好友联机","href":"https://node.bugg.icu/"},
+    {"label":"译文库","href":"https://translate.bugg.icu/"}
+  ],
+  "pages": {
+    "mirror":{"title":"Buggcraft 镜像源 - Minecraft 资源下载与启动器接入","description":"Buggcraft（BUGG启动器）的 Minecraft 镜像源，提供游戏核心、加载器、Java、依赖库和原版资源下载。支持其他启动器接入，也可以查看模组、资源包和整合包的中文介绍。","keywords":"Buggcraft,BUGG启动器,Minecraft镜像源,我的世界镜像源,Forge下载,NeoForge下载,Minecraft模组介绍"},
+    "index":{"title":"Minecraft 模组与整合包中文介绍 - Buggcraft","description":"浏览 Minecraft 模组、资源包、光影和整合包的中文介绍，查看支持版本、依赖和原站链接。译文库与 Buggcraft 镜像源共同提供资源查询服务。","keywords":"Buggcraft,BUGG启动器,Minecraft模组介绍,我的世界模组,整合包,资源包,光影"},
+    "docs":{"title":"Minecraft 镜像源接入文档 - Buggcraft","description":"将 Buggcraft 镜像源接入启动器，了解资源下载路径、User-Agent 规范、重定向和文件校验，也可以接入项目介绍与译文查询接口。","keywords":"Buggcraft,Minecraft镜像源,启动器接入,镜像API"},
+    "developers":{"title":"资源服务开发文档 - Buggcraft","description":"查看 Buggcraft 资源服务的接口与部署说明，了解镜像分发、项目译文查询以及如何部署自己的资源服务。","keywords":"Buggcraft,资源服务,镜像部署,Minecraft开发文档"}
+  }
+}

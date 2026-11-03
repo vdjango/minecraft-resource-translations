@@ -3,11 +3,13 @@
 import hashlib
 import json
 import math
+import os
 import re
 import time
 from urllib.parse import urlparse
 from collections import OrderedDict
 from html import escape
+from pathlib import Path
 
 import bleach
 from aiohttp import web
@@ -15,20 +17,29 @@ from markdown_it import MarkdownIt
 
 from .hashing import resource_ref
 from .languages import DEFAULT_LANGUAGE, LANGUAGES, normalize_language
+from .spa_shell import render_shell
 
 LABELS = dict(mod="模组", resourcepack="资源包", shader="光影", modpack="整合包")
-PUBLIC = {"index.html": ("共享译文库与镜像源 · Buggcraft", "浏览 Minecraft 项目共享译文，按需接入独立镜像源。"),
-          "mirror.html": ("Minecraft 镜像源 · Buggcraft", "为 Minecraft 启动器提供游戏核心、加载器、Java、依赖库与 assets 资源镜像，支持多节点分发、来源映射及共享译文接入。"),
-          "docs.html": ("镜像源与译文 API 开发文档 · Buggcraft", "接入 Minecraft 镜像源与共享译文，了解来源映射、缓存策略、多节点分发、独立部署及多语言接口示例。"),
-          "developers.html": ("开发者中心与服务节点 · Buggcraft", "接入 Minecraft 资源与译文服务，部署并加入社区节点，为启动器申请独立翻译生成额度。")}
+SEO = json.loads(Path(__file__).with_name("public-seo.json").read_text(encoding="utf-8"))
+PUBLIC = {key: (value["title"], value["description"]) for key, value in SEO["pages"].items()}
 
 
-def metadata(title, description, url):
+def metadata(title, description, url, keywords=""):
+    graph = {"@context": "https://schema.org", "@graph": [
+        {"@type": "SoftwareApplication", "@id": SEO["product"], "name": "Buggcraft", "alternateName": "BUGG启动器",
+         "url": "https://bugg.icu/", "applicationCategory": "GameApplication", "operatingSystem": "Windows, macOS, Linux",
+         "sameAs": ["https://github.com/vdjango/buggcraft"]},
+        {"@type": "WebPage", "@id": url+"#page", "url": url, "name": title, "description": description,
+         "about": {"@id": SEO["product"]}}]}
+    structured = json.dumps(graph, ensure_ascii=False).replace("<", "\\u003c")
     return (f'<title>{escape(title)}</title><meta name="description" content="{escape(description, quote=True)}">'
+            f'<meta name="keywords" content="{escape(keywords, quote=True)}">'
             f'<link rel="canonical" href="{escape(url, quote=True)}">'
             f'<meta property="og:type" content="website"><meta property="og:title" content="{escape(title, quote=True)}">'
             f'<meta property="og:description" content="{escape(description, quote=True)}"><meta property="og:url" content="{escape(url, quote=True)}">'
-            '<meta name="twitter:card" content="summary">')
+            f'<meta name="twitter:card" content="summary"><meta name="twitter:title" content="{escape(title, quote=True)}">'
+            f'<meta name="twitter:description" content="{escape(description, quote=True)}">'
+            f'<script type="application/ld+json">{structured}</script>')
 
 
 def render_body(text, format):
@@ -66,7 +77,16 @@ class PublicPages:
         self.api, self.root, self.store = api, root, api.store
         config = api.config
         self.base = (api.app["federation"].hub if config.federation_role == "mirror" else config.public_url).rstrip("/")
+        self.mirror_base = os.environ.get("TRANSLATION_MIRROR_PUBLIC_URL", self.base).rstrip("/")
+        if urlparse(self.mirror_base).scheme not in ("http", "https"):
+            raise ValueError("Invalid mirror public URL")
         self.cache, self.cache_bytes = OrderedDict(), 0
+
+    def mirror_home(self, request):
+        return self.mirror_base != self.base and request.host.split(":")[0].lower() == urlparse(self.mirror_base).hostname
+
+    def origin(self, request):
+        return self.mirror_base if self.mirror_home(request) else self.base
 
     def response(self, request, text, content_type="text/html", status=200, cache=False):
         if content_type == "text/html" and status == 200:
@@ -74,7 +94,11 @@ class PublicPages:
             # A mirror can route writes safely without probing the hub first.
             service = '译文节点在线' if self.api.config.federation_role == 'mirror' else '翻译服务在线' if self.api.config.api_key else '译文查询在线 · 生成暂不可用'
             text = text.replace('</head>', '<meta name="translation-hub" content="' + escape(self.base, quote=True) + '"></head>', 1)
-            text = text.replace('id="service-state">正在连接翻译服务', 'id="service-state">' + service)
+            # The cached application shell carries the initial Vue state. Keep
+            # its service indicator current when configuration changes.
+            text = re.sub(r'("serviceState":)"(?:\\.|[^"\\])*"',
+                          lambda match: match.group(1) + json.dumps(service, ensure_ascii=False),
+                          text, count=1)
         body = text.encode("utf-8")
         etag = '"' + hashlib.sha256(body).hexdigest() + '"'
         # The deployed CDN enforces a long browser TTL for cacheable responses.
@@ -106,25 +130,25 @@ class PublicPages:
 
     async def page(self, request, file):
         if file not in PUBLIC:
-            response = web.FileResponse(self.root / file)
-            response.headers["X-Robots-Tag"] = "noindex, nofollow"
-            return response
+            return web.Response(status=404)
+        mirror_home = self.mirror_home(request)
+        if mirror_home and file == "mirror":
+            raise web.HTTPMovedPermanently(location="/")
+        if mirror_home and file == "index":
+            file = "mirror"
+        page_base = self.base if file == "index" else self.mirror_base
+        mode = "mirror" if mirror_home else "translation"
         async def build():
-            html = (self.root / file).read_text(encoding="utf-8")
             title, description = PUBLIC[file]
-            url = self.base + ("/" if file == "index.html" else "/" + file[:-5])
-            html = re.sub(r"<title>.*?</title>", metadata(title, description, url), html, count=1, flags=re.S)
-            if file == "index.html" and self.api.config.federation_role != "mirror":
-                # Seed Vue using an inert HTML attribute (no executable inline JS).
+            url = page_base + ("/" if file == "index" or file == "mirror" and self.mirror_base != self.base else "/" + file)
+            seed = {"publicMode": mode, "publicOrigin": self.origin(request),
+                    "mirrorBase": self.mirror_base, "translationBase": self.base}
+            if file == "index" and self.api.config.federation_role != "mirror":
                 data = json.loads((await self.api.catalogue(request)).body)
-                cards = []
-                for p in data["projects"]:
-                    ref = p["resource"]
-                    href = "/projects/" + ref["provider"] + "/" + ref["project_id"]
-                    authors = "、".join(a["name"] for a in p["metadata"].get("authors", []))
-                    cards.append(f'<article class="card resource-card"><div class="project-icon">{escape(p["title"][:1])}</div><div class="resource-main"><a class="resource-title" href="{escape(href)}">{escape(p["title"])}</a><div class="resource-author">{escape(authors)}</div><p class="resource-summary">{escape(p.get("localized_summary") or p["summary"])}</p><span class="tag">{LABELS.get(p["kind"], "资源")}</span></div></article>')
-                html = html.replace('<section id="projects" class="resource-list"></section>', '<section id="projects" class="resource-list">' + "".join(cards) + '</section><div id="catalog-seed" hidden data-catalog="' + escape(json.dumps(data, ensure_ascii=False), quote=True) + '"></div>')
-            return html
+                seed["catalogueData"] = json.dumps(data, ensure_ascii=False)
+            seed["serviceState"] = ('译文节点在线' if self.api.config.federation_role == 'mirror' else
+                                    '翻译服务在线' if self.api.config.api_key else '译文查询在线 · 生成暂不可用')
+            return render_shell(self.root, file, metadata(title, description, url, SEO["pages"][file]["keywords"]), seed=seed)
         # Search strings and cursor combinations never enter the HTML cache.
         if request.query_string:
             response = self.response(request, await build())
@@ -133,9 +157,9 @@ class PublicPages:
         # The catalogue is a read-heavy public entry point. A short independent
         # cache keeps task progress from rebuilding the full SSR card list on
         # every hit, while the five-second bound keeps new translations visible.
-        if file == "index.html":
-            return self.response(request, await self.cached(file, build, ttl=5, versioned=False), cache=True)
-        return self.response(request, await self.cached(file, build), cache=True)
+        if file == "index":
+            return self.response(request, await self.cached((file, mode), build, ttl=5, versioned=False), cache=True)
+        return self.response(request, await self.cached((file, mode), build), cache=True)
 
     async def project(self, request):
         from .api import ApiError
@@ -155,14 +179,23 @@ class PublicPages:
                 status = "无需翻译 · 内容已就绪，保留原文"
             path = "/projects/" + resource["provider"] + "/" + resource["project_id"]
             url = self.base + path + ("?target_language=" + language if language != DEFAULT_LANGUAGE else "")
-            html = (self.root / "project.html").read_text(encoding="utf-8")
             description = bleach.clean(values["summary"], tags=set(), strip=True)[:180]
             info = [("资源类型", LABELS.get(source["kind"], "资源")), ("作者", "、".join(a["name"] for a in meta.get("authors", []))), ("更新时间", meta.get("updated_at", "")), ("创建时间", meta.get("created_at", "")), ("加载器", " / ".join(meta.get("loaders", []))), ("Minecraft 版本", " / ".join(meta.get("game_versions", []))), ("许可证", str(meta.get("license") or "原站未提供"))]
             options = "".join(f'<option value="{code}"'+(' selected' if code == language else '')+f'>{escape(names[0])}</option>' for code, names in LANGUAGES.items())
             body_format = fields["body"].get("translation", {}).get("format", source["fields"]["body"]["format"])
-            substitutions = {"HEAD": metadata(title + " · " + LABELS.get(source["kind"], "资源") + "介绍与翻译 · Buggcraft", description, url), "TITLE": escape(title), "SUMMARY": escape(values["summary"]), "STATUS": escape(status), "BODY": render_body(values["body"], body_format), "ORIGINAL": render_body(source["fields"]["body"]["text"], source["fields"]["body"]["format"]), "SOURCE_URL": escape(source["source_url"], quote=True), "INFO": "".join(f'<dt>{escape(k)}</dt><dd>{escape(str(v))}</dd>' for k, v in info), "TAGS": "".join('<span class="tag">'+escape(t)+'</span>' for t in meta.get("tags", [])), "OPTIONS": options, "SEED": escape(json.dumps(data, ensure_ascii=False), quote=True)}
-            substitutions["RELEASES"] = releases_html(meta)
-            return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: substitutions[m[1]], html)
+            seed = {"title": title, "summary": values["summary"], "status": status,
+                    "body": render_body(values["body"], body_format),
+                    "original": render_body(source["fields"]["body"]["text"], source["fields"]["body"]["format"]),
+                    "sourceUrl": source["source_url"],
+                    "info": "".join(f'<dt>{escape(k)}</dt><dd>{escape(str(v))}</dd>' for k, v in info),
+                    "tags": "".join('<span class="tag">'+escape(t)+'</span>' for t in meta.get("tags", [])),
+                    "options": options, "detail": json.dumps(data, ensure_ascii=False),
+                    "releases": releases_html(meta)}
+            page_title = title + " - " + LABELS.get(source["kind"], "资源") + "中文介绍 - Buggcraft"
+            seed.update(mirrorBase=self.mirror_base, translationBase=self.base,
+                        seo=json.dumps({"title": page_title, "description": description, "url": url}, ensure_ascii=False))
+            head = metadata(page_title, description, url, "Buggcraft,Minecraft," + LABELS.get(source["kind"], "资源") + "," + title)
+            return render_shell(self.root, "project", head, seed=seed)
         try:
             text = await self.cached((request.path, language), build)
         except ApiError as exc:
@@ -174,7 +207,7 @@ class PublicPages:
         return self.response(request, text, cache=True)
 
     async def robots(self, request):
-        return self.response(request, "User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /admin\nDisallow: /assets/examples/\nSitemap: " + self.base + "/sitemap.xml\n", "text/plain", cache=True)
+        return self.response(request, "User-agent: *\nAllow: /\nDisallow: /v1/\nDisallow: /api/\nDisallow: /mirror-api/\nDisallow: /admin\nDisallow: /account\nDisallow: /login\nDisallow: /assets/examples/\nSitemap: " + self.origin(request) + "/sitemap.xml\n", "text/plain", cache=True)
 
     def xml(self, request, items, index=False):
         container, item, namespace = ("sitemapindex", "sitemap", "http://www.sitemaps.org/schemas/sitemap/0.9") if index else ("urlset", "url", "http://www.sitemaps.org/schemas/sitemap/0.9")
@@ -182,17 +215,25 @@ class PublicPages:
         return self.response(request, text, "application/xml", cache=True)
 
     async def sitemap_index(self, request):
-        count = (await self.store.one("SELECT COUNT(*) AS n FROM catalogue"))["n"]
+        if self.mirror_home(request):
+            return self.xml(request, [self.mirror_base + path for path in ("/", "/docs", "/developers")])
+        count = (await self.store.one("SELECT COUNT(*) AS n FROM catalogue c JOIN resources r ON r.key=c.key WHERE trim(c.title)<>'' AND trim(c.summary)<>''"))["n"]
         return self.xml(request, [self.base + "/sitemaps/pages.xml"] + [self.base + f"/sitemaps/projects-{n}.xml" for n in range(1, math.ceil(count / 1000) + 1)], index=True)
 
     async def sitemap_pages(self, request):
+        if self.mirror_home(request):
+            return self.xml(request, [self.mirror_base + path for path in ("/", "/docs", "/developers")])
+        if self.mirror_base != self.base:
+            return self.xml(request, [self.base + "/"])
         return self.xml(request, [self.base + path for path in ("/", "/mirror", "/docs", "/developers")])
 
     async def sitemap_projects(self, request):
+        if self.mirror_home(request):
+            raise web.HTTPNotFound()
         page = int(request.match_info["page"])
-        count = (await self.store.one("SELECT COUNT(*) AS n FROM catalogue"))["n"]
+        count = (await self.store.one("SELECT COUNT(*) AS n FROM catalogue c JOIN resources r ON r.key=c.key WHERE trim(c.title)<>'' AND trim(c.summary)<>''"))["n"]
         if not 1 <= page <= math.ceil(count / 1000):
             raise web.HTTPNotFound()
-        rows = await self.store.rows("SELECT r.ref FROM catalogue c JOIN resources r ON r.key=c.key ORDER BY c.key LIMIT 1000 OFFSET ?", ((page - 1) * 1000,))
+        rows = await self.store.rows("SELECT r.ref FROM catalogue c JOIN resources r ON r.key=c.key WHERE trim(c.title)<>'' AND trim(c.summary)<>'' ORDER BY c.key LIMIT 1000 OFFSET ?", ((page - 1) * 1000,))
         refs = [json.loads(row["ref"]) for row in rows]
         return self.xml(request, [self.base + "/projects/" + r["provider"] + "/" + r["project_id"] for r in refs])

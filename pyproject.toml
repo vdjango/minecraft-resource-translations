@@ -16,6 +16,8 @@ dependencies = ["aiohttp>=3.11,<4", "aiosqlite>=0.21,<1", "bleach>=6.2,<7", "jso
 build = ["pyinstaller>=6.10,<7"]
 windows = ["pywin32>=306; platform_system == 'Windows'"]
 qiniu = ["qiniu>=7.18,<8"]
+s3 = ["boto3>=1.36,<2"]
+acme = ["certbot>=4,<6", "certbot-dns-cloudflare>=4,<6"]
 
 [project.scripts]
 mc-translate = "mc_translate.__main__:main"
@@ -25,4 +27,4 @@ mc-mirror = "mc_translate.mirror:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-mc_translate = ["web/*", "web/examples/*", "contracts/*"]
+mc_translate = ["public-seo.json", "web/*", "web/examples/*", "contracts/*"]
