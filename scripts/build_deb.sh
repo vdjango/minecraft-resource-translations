@@ -36,7 +36,7 @@ if ! getent passwd buggtranslate >/dev/null; then useradd --system --gid buggtra
 mkdir -p "$DATA"
 chown -R buggtranslate:buggtranslate "$DATA"
 if [ ! -x "$VENV/bin/python" ]; then python3 -m venv "$VENV"; fi
-"$VENV/bin/python" -m pip install --no-cache-dir --upgrade "$APP"
+"$VENV/bin/python" -m pip install --no-cache-dir --upgrade "$APP[s3,qiniu]"
 if [ ! -f /etc/buggcraft-translation.env ]; then
   sed -e 's|TRANSLATION_HOST=.*|TRANSLATION_HOST=127.0.0.1|' \
       -e 's|TRANSLATION_DATABASE=.*|TRANSLATION_DATABASE=/var/lib/buggcraft-translation/translations.sqlite3|' \
