@@ -19,7 +19,7 @@ import aiosqlite
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
 from .config import Config, load_env
-from .mirror_catalog import Inventory, MANIFEST, allowed_url, route_for
+from .mirror_catalog import Inventory, MANIFEST, allowed_url, route_for, prefetch_matches_platform, selected_prefetch_platforms
 from .mirror_policy import POLICIES, MODES, category_for
 from .mirror_routing import ROUTING_DEFAULTS, Egress, requested_bytes, source_target, source_targets, validate_sources
 from .federation import origin, PublicResolver
@@ -34,6 +34,7 @@ from .mirror_cloud import MirrorCloud
 GIB = 1024 ** 3
 DEFAULTS = dict(enabled=True, public_url='https://mirror.bugg.icu', quota_gib=400,
                 reserve_gib=100, concurrency=4, metadata_ttl=300, policies=POLICIES,
+                prefetch_platform=['windows'],
                 auto_refresh=True, refresh_minutes=30, eviction='oldest_version',
                 protect_latest=2, nodes=[], node_weight=1, auto_sources=True, source_prefer_cn=True,
                 source_cleanup=False, source_registries=BUILTIN_SOURCES, **ROUTING_DEFAULTS, **QUALITY_DEFAULTS,
@@ -70,7 +71,10 @@ def read_settings(config, *, effective=True):
     routes = data.get('qiniu_routes', {})
     if not isinstance(routes, dict):
         routes = {}
-    return {**DEFAULTS, **data, 'policies': {**POLICIES, **data.get('policies', {})},
+    slow = data.get('quality_slow_kibps', data.get('room_cache_slow_kibps', DEFAULTS['quality_slow_kibps']))
+    return {**DEFAULTS, **data, 'prefetch_platform': selected_prefetch_platforms(data.get('prefetch_platform', DEFAULTS['prefetch_platform'])),
+            'quality_slow_kibps': slow, 'room_cache_slow_kibps': slow,
+            'policies': {**POLICIES, **data.get('policies', {})},
             'qiniu_routes': {name: {**route, **routes.get(name, {})} for name, route in LOCAL_ROUTES.items()},
             'sources': effective_sources(config) if effective else data.get('sources', [])}
 
@@ -79,6 +83,10 @@ def validate_settings(data):
     if not isinstance(data, dict) or set(data) - DEFAULTS.keys():
         raise ValueError('invalid mirror settings')
     result = {**DEFAULTS, **data}
+    # Keep legacy clients compatible while exposing one shared slow-speed line.
+    if 'room_cache_slow_kibps' in data and 'quality_slow_kibps' not in data:
+        result['quality_slow_kibps'] = data['room_cache_slow_kibps']
+    result['room_cache_slow_kibps'] = result['quality_slow_kibps']
     policies = result['policies']
     if (not isinstance(policies, dict) or set(policies) - POLICIES.keys()
             or any(type(value) is not str or value not in MODES for value in policies.values())):
@@ -86,6 +94,7 @@ def validate_settings(data):
     result['policies'] = {**POLICIES, **policies}
     if result['eviction'] not in ('stop', 'lru', 'oldest_version'):
         raise ValueError('invalid eviction strategy')
+    result['prefetch_platform'] = selected_prefetch_platforms(result['prefetch_platform'])
     if not isinstance(result['nodes'], list) or len(result['nodes']) > 16:
         raise ValueError('invalid nodes')
     nodes = []
@@ -127,7 +136,8 @@ def validate_settings(data):
             raise ValueError('invalid ' + key)
     for key, low, high in [('quality_interval_hours', 1, 168), ('quality_daily_mib', 1, 1024),
                            ('quality_sample_kib', 64, 1024), ('quality_fast_kibps', 64, 102400),
-                           ('quality_slow_kibps', 1, 102400)]:
+                           ('quality_slow_kibps', 1, 102400), ('quality_content_minutes', 5, 120),
+                           ('quality_backup_minutes', 5, 120), ('quality_modrinth_minutes', 5, 120)]:
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValueError('invalid ' + key)
     if result['quality_slow_kibps'] >= result['quality_fast_kibps']:
@@ -226,12 +236,14 @@ class Mirror:
         self.last_refresh = None
         self.job_state = dict(state='idle')
         self.inventory = None
+        from .mirror_automation import AutomaticSync
+        self.automation = AutomaticSync(self)
         self.started = time.time()
         self.token_path = self.root / 'control-token'
         self.sources = SourceManagement(self)
         self.quality = SourceQuality(self)
         self.observation = MirrorObservation(self)
-        self.room_cache = RoomCache(self, lambda: read_settings(self.config))
+        self.room_cache = RoomCache(self, lambda: read_settings(self.config,effective=False))
         self.cloud = MirrorCloud(self, lambda: read_settings(self.config))
 
     async def open(self):
@@ -260,6 +272,10 @@ class Mirror:
                 first_failed REAL NOT NULL, last_failed REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS failed_files_order ON mirror_failed_files(last_failed);
         ''')
+        async with self.db.execute('PRAGMA table_info(mirror_failed_files)') as cursor:
+            failure_columns = {row['name'] for row in await cursor.fetchall()}
+        if 'next_retry' not in failure_columns:
+            await self.db.execute('ALTER TABLE mirror_failed_files ADD COLUMN next_retry REAL NOT NULL DEFAULT 0')
         async with self.db.execute('PRAGMA table_info(objects)') as cursor:
             object_columns = {row['name'] for row in await cursor.fetchall()}
         for name in ('accessed', 'priority', 'local'):
@@ -324,6 +340,9 @@ class Mirror:
             status=excluded.status,error=excluded.error,attempts=attempts+1,
             last_failed=excluded.last_failed''',
             (url, category_for(url), getattr(exc, 'status', None), detail, time.time(), time.time()))
+        failure = await self.one('SELECT attempts,status FROM mirror_failed_files WHERE url=?', (url,))
+        delay = min(21600, (1800 if failure['status'] in (404, 410) else 60) * 2**min(failure['attempts']-1, 8))
+        await self.db.execute('UPDATE mirror_failed_files SET next_retry=? WHERE url=?', (time.time()+delay+secrets.randbelow(max(1, delay//5)), url))
         await self.db.commit()
         self.failed_urls.add(url)
 
@@ -348,6 +367,7 @@ class Mirror:
                     active_downloads=len(self.inflight), job={**self.job_state, **({'progress': self.inventory.progress} if self.inventory else {})},
                     refresh=dict(next_at=self.next_refresh, last=self.last_refresh,
                                  deferred_at=self.refresh_deferred_at),
+                    automation=dict(self.automation.state),
                     automatic_sources=source_status(self.root),
                     source_statistics=await self.sources.summary(),
                     source_quality=await self.quality.snapshot(),
@@ -397,7 +417,7 @@ class Mirror:
             after = tuple(candidates[-1][column] for column in columns)
             for item in candidates:
                 digest = item['digest']
-                if self.serving.get(digest) or self.cloud.active_digest == digest:
+                if self.serving.get(digest) or self.cloud.uploading(digest):
                     continue
                 file = self.root/'objects'/digest[:2]/digest
                 try:
@@ -499,9 +519,13 @@ class Mirror:
             sha1 = re.search(r'/(?:objects|packages)/([a-f0-9]{40})/', url)[1]
         if urlsplit(url).hostname == 'resources.download.minecraft.net':
             sha1 = url.rsplit('/', 1)[1]
+        category = category_for(url, expected['category'] if expected else None)
+        route = settings['qiniu_routes'][category]
         part = self.root / 'tmp' / (secrets.token_hex(16) + '.part')
         reservation = 0
-        progress = dict(bytes=0, total=None, started_at=time.time())
+        progress = dict(bytes=0, total=None, started_at=time.time(), category=category,
+                        source_host=urlsplit(fetch_url or url).hostname,
+                        destination=route['mode'], profile=route['profile'])
         self.observation.transfers[url] = progress
         try:
             async with self.http.get(fetch_url or url, allow_redirects=False) as response:
@@ -563,7 +587,6 @@ class Mirror:
                                           (url, digest, written, h1.hexdigest(), int(bool(sha1)), time.time(), content_type))
                     await self.db.commit()
                 await self.remember_metadata(url, dest)
-                category = category_for(url, expected['category'] if expected else None)
                 try:
                     await self.cloud.enqueue('mirror', digest, written, category)
                 except Exception:
@@ -655,41 +678,101 @@ class Mirror:
             'X-Mirror-Mode': mode, 'X-Mirror-Category': category, 'X-Mirror-Reason': reason})
 
     async def fallback(self, settings, path, url, category, reason, direct=False):
+        if category == 'mods' and not direct and settings['enabled']:
+            public = await self.room_cache.fast_public_source(url)
+            if public:
+                return self.redirect(public, category, 'catalog_public_source')
         # At most one federation hop; a saturated destination goes to an external source.
-        node = None if direct else self.select_node(settings, category, include_local=False)
+        node = None if direct or settings['qiniu_routes'][category]['mode'] == 'cloud' else self.select_node(settings, category, include_local=False)
         if node:
             return self.redirect(node+'/_mirror_node'+quote(path, safe='/@+'), category, reason, 'node')
         target = source_target(settings, path, 'fallback')
         if target and await self.upstream_available(target, external=True):
             return self.redirect(target, category, reason, 'external')
+        # NeoForge's publisher can be unreachable from domestic clients. The
+        # enabled Minecraft repositories use /maven/, not our loader alias.
+        # This fixed artifact mapping needs no per-download API/latency probe.
+        # Explicit file mappings above continue to take precedence.
+        suffix = path[len('/neoforge-maven/releases/'):] if path.startswith('/neoforge-maven/releases/') else (
+            path[len('/maven/'):] if path.startswith('/maven/') else '')
+        neo = re.fullmatch(r'net/neoforged/neoforge/([A-Za-z0-9._-]+)/neoforge-\1-installer\.jar', suffix)
+        if (not direct and category == 'loaders' and neo and settings['auto_sources']
+                and settings['source_prefer_cn']):
+            candidates = [row['url'] + 'maven/' + suffix for row in settings['source_registries']
+                          if row['enabled'] and row['kind'] == 'minecraft' and row['region'] == 'cn']
+            for candidate in self.quality.ranked(path, candidates):
+                await self.upstream_available(candidate, external=True)
+                if candidate in self.origin_health and not self.origin_health[candidate][1]:
+                    continue
+                return self.redirect(candidate, category, reason, 'external')
         return self.redirect(url, category, reason)
 
     async def resource(self, request):
         settings = read_settings(self.config)
-        own_origin_only = request.headers.get('X-Buggcraft-Origin-Only') == '1'
+        requested_origin_only = request.headers.get('X-Buggcraft-Origin-Only') == '1'
         if request.query_string:
             raise web.HTTPBadRequest(text='Queries are not supported')
         direct = request.path.startswith('/_mirror_node/')
         path = request.path[len('/_mirror_node'):] if direct else request.path
         urls = upstreams(path)
-        mapped_targets = [] if own_origin_only or direct else source_targets(settings,path,'redirect')
+        # Pack archives route to their publisher without occupying mirror
+        # storage. A resource pack may also be ZIP, so only a caller-provided
+        # pack hint or the unambiguous .mrpack extension selects this path.
+        is_pack = path.lower().endswith('.mrpack') or (
+            path.lower().endswith('.zip') and request.headers.get('X-Buggcraft-Pack-Archive') == '1')
+        mapped_targets = [] if direct else source_targets(settings,path,'redirect')
+        if urls and path.startswith('/mods/') and is_pack:
+            # Keep whole archives out of storage, but honour an operator's
+            # explicit redirect mapping instead of sending every pack back
+            # to a publisher that may be unreachable for this player.
+            target = self.quality.ranked(path, mapped_targets)[0] if mapped_targets else urls[0]
+            return self.redirect(target, 'mods', 'pack_archive_redirect',
+                                 'external' if mapped_targets else 'redirect')
         if not urls and not mapped_targets:
             raise web.HTTPNotFound()
         category = 'java' if path.startswith('/java/') else await self.category(urls[0]) if urls else 'libraries'
-        mode = 'cache' if own_origin_only and settings['enabled'] else settings['policies'][category]
+        mode = settings['policies'][category]
+        # An older launcher may send this header for every resource. It must
+        # not override the operator's redirect/disabled/backup policy.
+        # A cloud-only route is intentionally served by a verified object-storage
+        # redirect. An older launcher's origin-only hint must not force a local copy.
+        own_origin_only = (requested_origin_only and settings['enabled'] and mode == 'cache'
+                           and settings['qiniu_routes'][category]['mode'] != 'cloud')
+        if own_origin_only:
+            mapped_targets = []
+        fast_mod_url = (await self.room_cache.fast_public_source(urls[0], preferred_only=mode in ('cache','backup'))
+                        if settings['enabled'] and category == 'mods' and not own_origin_only and urls else None)
+        if fast_mod_url:
+            # The operator's hash-matched catalogue can direct the player to
+            # a fast source without fetching the file through this server.
+            if mode == 'backup' and request.method == 'GET':
+                self.backup(urls[0])
+            return self.redirect(fast_mod_url, category, 'catalog_fast_source')
+        if category == 'mods' and mode == 'cache' and urls:
+            room_copy = await self.room_cache.cached_catalog_url(urls[0])
+            if room_copy:
+                return self.redirect(settings['public_url'] + room_copy, category,
+                                     'verified_room_file', 'cache')
         mapped_targets = self.quality.ranked(path, mapped_targets)
-        adaptive = bool(urls and self.quality.needs_cache(path, mapped_targets))
+        adaptive = bool(settings['enabled'] and urls and self.quality.needs_cache(path, mapped_targets))
+        adaptive_copy = await self.cached(urls[0]) if adaptive and mode == 'cache' else None
+        if adaptive and mode == 'cache' and not adaptive_copy and request.method == 'GET':
+            # Current downloads keep using a working source while the bounded
+            # backup queue prepares acceleration for subsequent requests.
+            self.backup(urls[0])
         if adaptive and mode == 'backup' and request.method == 'GET':
             self.backup(urls[0])
         # A quality hint cannot override a category's redirect/disabled policy.
-        for mapped in ([] if adaptive and mode == 'cache' else mapped_targets):
+        for mapped in ([] if adaptive_copy else mapped_targets):
             healthy = await self.upstream_available(mapped, external=True)
             if mapped in self.origin_health and not healthy:
                 continue
             if request.method=='GET':
                 self.sources.hit(path,mapped)
+                if settings['enabled'] and mode == 'backup' and urls:
+                    self.backup(urls[0])
             return self.redirect(mapped, category, 'source_mapping', 'external')
-        if mapped_targets and not (adaptive and mode == 'cache'):
+        if mapped_targets and not adaptive_copy:
             if not urls:
                 raise web.HTTPServiceUnavailable(headers={'Retry-After':'30'})
             return await self.fallback(settings,path,urls[0],category,'mapped_source_unavailable',direct)
@@ -700,28 +783,70 @@ class Mirror:
             return self.redirect(urls[0], category, 'local_disabled')
         if mode == 'cache':
             known = await self.cached(urls[0])
+            if not known and settings['qiniu_routes'][category]['mode'] == 'cloud':
+                indexed = await self.one('SELECT * FROM cache WHERE url=?', (urls[0],))
+                if indexed and await self.cloud.location('mirror', indexed['object']):
+                    known = indexed
+            if known and settings['qiniu_routes'][category]['mode'] == 'cloud' and not own_origin_only:
+                cloud_url = await self.cloud.download_url('mirror', known['object'],
+                    reserve=request.method != 'HEAD', method=request.method)
+                if cloud_url:
+                    return self.redirect(cloud_url, category, 'verified_cloud_copy', 'cloud')
+                # Existing local files are migrated on demand after a route changes.
+                if (self.root / 'objects' / known['object'][:2] / known['object']).is_file():
+                    try:
+                        await self.cloud.enqueue('mirror', known['object'], known['size'], category)
+                    except StorageError:
+                        logging.warning('Cloud route unavailable for %s', category)
+                else:
+                    # A cloud budget or health failure must not redownload a
+                    # verified object merely to recreate a local staging copy.
+                    return await self.fallback(settings, path, urls[0], category, 'cloud_unavailable', direct)
+            if settings['qiniu_routes'][category]['mode'] == 'cloud':
+                # Cloud preparation must not keep the player's request waiting
+                # for a complete origin download and a later upload.
+                if request.method == 'GET':
+                    self.backup(urls[0])
+                return await self.fallback(settings, path, urls[0], category, 'cloud_upload_pending', direct)
+            stale = bool(known and mutable_metadata(urls[0])
+                         and time.time() - known['fetched'] >= settings['metadata_ttl'])
             expected = None if known else await self.one('SELECT size FROM expected WHERE url=?', (urls[0],))
             planned = known['size'] if known else expected['size'] if expected and expected['size'] is not None else 1
-            reason = await self.egress.reason(requested_bytes(request, planned), settings, sum(self.serving.values()))
+            reason = (await self.egress.reason(requested_bytes(request, planned), settings, sum(self.serving.values()))
+                      if settings['qiniu_routes'][category]['mode'] != 'cloud' else None)
             if reason:
                 if own_origin_only:
                     raise web.HTTPServiceUnavailable(text='Buggcraft 源站当前容量或流量不足。',
                                                      headers={'Retry-After':'30'})
                 if known:
-                    cloud_url = await self.cloud.download_url('mirror', known['object'])
+                    cloud_url = await self.cloud.download_url('mirror', known['object'], reserve=request.method != 'HEAD', method=request.method)
                     if cloud_url:
                         return self.redirect(cloud_url, category, reason, 'cloud')
                 return await self.fallback(settings, path, urls[0], category, reason, direct)
-        if mode == 'cache' and not direct:
+        if mode == 'cache' and not direct and settings['qiniu_routes'][category]['mode'] != 'cloud':
             target = None if own_origin_only else self.select_node(settings, category)
             if target:
                 return self.redirect(target+'/_mirror_node'+quote(path, safe='/@+'), category, 'weighted_node', 'node')
+        if mode == 'cache' and not own_origin_only and (not known or stale):
+            # Player downloads must not queue behind cache population or
+            # metadata refresh. The bounded, deduplicated background queue
+            # prepares later requests while this one uses a working source.
+            if request.method == 'GET':
+                self.backup(urls[0])
+            return await self.fallback(settings, path, urls[0], category,
+                                       'cache_refresh_pending' if stale else 'cache_miss', direct)
         item, fallback = None, False
         if mode == 'backup':
             item = await self.cached(urls[0])
+            if not item and settings['qiniu_routes'][category]['mode'] == 'cloud':
+                indexed = await self.one('SELECT * FROM cache WHERE url=?', (urls[0],))
+                if indexed and await self.cloud.location('mirror', indexed['object']):
+                    item = indexed
             if item:
-                fallback = not await self.upstream_available(urls[0])
-            self.backup(urls[0])
+                fallback = (self.quality.content_metric(urls[0])['health'] in ('slow', 'unavailable')
+                            or not await self.upstream_available(urls[0]))
+            if not item or (self.root / 'objects' / item['object'][:2] / item['object']).is_file():
+                self.backup(urls[0])
         if mode == 'redirect' or mode == 'backup' and not fallback:
             return web.Response(status=307, headers={
                 'Location': urls[0], 'Cache-Control': 'no-store',
@@ -738,9 +863,15 @@ class Mirror:
                                                      headers={'Retry-After':'30'}) from exc
                 return await self.fallback(settings, path, urls[0], category, 'local_'+str(getattr(exc, 'status', 'io')), direct)
         local_path = self.root / 'objects' / item['object'][:2] / item['object']
-        cloud_url = await self.cloud.download_url('mirror', item['object'])
-        if cloud_url and not own_origin_only and (settings['qiniu_routes'][category]['mode'] == 'cloud' or not local_path.is_file()):
-            return self.redirect(cloud_url, category, 'verified_cloud_copy', 'cloud')
+        cloud_url = None
+        if not own_origin_only and (settings['qiniu_routes'][category]['mode'] == 'cloud' or not local_path.is_file()):
+            cloud_url = await self.cloud.download_url('mirror', item['object'], reserve=request.method != 'HEAD', method=request.method) if item else None
+            if cloud_url:
+                return self.redirect(cloud_url, category, 'verified_cloud_copy', 'cloud')
+        if settings['qiniu_routes'][category]['mode'] == 'cloud':
+            # This copy is only a staging file until cloud verification completes.
+            # Never route cloud-only downloads through the local egress budget.
+            return await self.fallback(settings, path, urls[0], category, 'cloud_upload_pending', direct)
         if not local_path.is_file():
             if own_origin_only:
                 raise web.HTTPServiceUnavailable(text='Buggcraft 源站暂无此文件的本地副本。', headers={'Retry-After':'30'})
@@ -759,6 +890,7 @@ class Mirror:
             if own_origin_only:
                 raise web.HTTPServiceUnavailable(text='Buggcraft 源站当前无法提供文件。',
                                                  headers={'Retry-After':'30'})
+            cloud_url = await self.cloud.download_url('mirror', item['object'], reserve=request.method != 'HEAD', method=request.method)
             if cloud_url:
                 return self.redirect(cloud_url, category, reason, 'cloud')
             return await self.fallback(settings, path, urls[0], category, reason, direct)
@@ -804,13 +936,44 @@ class Mirror:
         if not secrets.compare_digest(request.headers.get('X-Mirror-Control', ''), self.secret):
             raise web.HTTPForbidden()
         if request.method == 'POST':
-            data = await request.json()
+            data = await request.clone(client_max_size=2 * 1024 * 1024).json()
             if not isinstance(data, dict):
                 raise web.HTTPBadRequest(text='Expected a JSON object')
             action = data.get('action')
+            if action == 'inventory_files':
+                try:
+                    result = await self.observation.inventory_view.files(data)
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(result, headers={'Cache-Control': 'no-store'})
+            if action == 'content_files':
+                try:
+                    result = await self.room_cache.public_files(data)
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(result,headers={'Cache-Control':'no-store'})
+            if action in ('cloud_cleanup_preview', 'cloud_cleanup_local'):
+                try:
+                    result = await (self.cloud.local_cleanup_candidates(after=data.get('after', ''))
+                        if action == 'cloud_cleanup_preview' else self.cloud.cleanup_local(data.get('digests')))
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(result, headers={'Cache-Control': 'no-store'})
+            if action == 'room_catalog_import':
+                try:
+                    result = await self.room_cache.import_catalog(data)
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(result, headers={'Cache-Control': 'no-store'})
             if action in ('cache_files', 'room_files'):
                 try:
                     result = await (self.observation.files(data) if action == 'cache_files' else room_files(self.room_cache, data))
+                except ValueError as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(result, headers={'Cache-Control': 'no-store'})
+            if action == 'cloud_jobs':
+                try:
+                    result = await self.cloud.jobs_page(data.get('route', ''), data.get('state', ''), data.get('offset', 0))
                 except ValueError as exc:
                     raise web.HTTPBadRequest(text=str(exc)) from None
                 return web.json_response(result, headers={'Cache-Control': 'no-store'})
@@ -822,6 +985,12 @@ class Mirror:
                 return web.json_response(dict(queued=queued, cloud_storage=await self.cloud.snapshot()), headers={'Cache-Control': 'no-store'})
             if action == 'cloud_retry':
                 return web.json_response(dict(retried=await self.cloud.retry(data['job_id']), cloud_storage=await self.cloud.snapshot()), headers={'Cache-Control': 'no-store'})
+            if action == 'cloud_tls_issue':
+                try:
+                    self.cloud.tls.schedule(data['profile'])
+                except (KeyError, StorageError) as exc:
+                    raise web.HTTPBadRequest(text=str(exc)) from None
+                return web.json_response(dict(ok=True, cloud_storage=await self.cloud.snapshot()), headers={'Cache-Control': 'no-store'})
             if action in ('cloud_probe', 'cloud_test'):
                 try:
                     storage = self.cloud.storage(data['profile'])
@@ -879,6 +1048,7 @@ class Mirror:
                 await self.sources.cleanup()
                 return
             if action in ('inventory', 'refresh'):
+                self.job_state['phase'] = 'catalogue'
                 self.inventory = Inventory(self.root, read_settings(self.config)['concurrency'])
                 report = await self.inventory.scan(incremental=action == 'refresh')
                 if not report['complete'] and action == 'inventory':
@@ -894,16 +1064,19 @@ class Mirror:
                 await self.db.execute('UPDATE objects SET priority=MAX(priority,COALESCE((SELECT MAX(p.priority) FROM cache c JOIN priorities p ON p.url=c.url WHERE c.object=objects.digest),0))')
                 await self.db.commit()
                 if read_settings(self.config)['auto_sources']:
+                    self.job_state['phase'] = 'sources'
                     await self.discover_sources()
                 self.job_state.update(state='finished', report=report)
-            if action in ('prefetch', 'refresh', 'retry_failures'):
+            if action in ('prefetch', 'refresh', 'retry_failures', 'automatic'):
+                self.job_state['phase'] = 'selection'
                 if action == 'retry_failures':
                     async with self.db.execute(
-                            'SELECT url FROM mirror_failed_files ORDER BY last_failed ASC LIMIT 200') as cursor:
+                            'SELECT url FROM mirror_failed_files WHERE next_retry<=? ORDER BY next_retry ASC LIMIT 100', (time.time(),)) as cursor:
                         failures = [row['url'] for row in await cursor.fetchall()]
                     files = []
                     for url in failures:
                         if not url or not allowed_url(url):
+                            await self.clear_failure(url)
                             continue
                         known = await self.one('SELECT sha1,size,category FROM expected WHERE url=?', (url,))
                         files.append(dict(url=url, path=route_for(url), category=known['category'] if known else category_for(url),
@@ -913,10 +1086,25 @@ class Mirror:
                     files = [i for i in self.inventory.items.values() if i['url'] in self.inventory.changed_urls]
                 else:
                     data = json.loads(await asyncio.to_thread((self.root / 'inventory.json').read_text, encoding='utf-8'))
-                    if not data['report']['complete']:
+                    if not data['report']['complete'] and action != 'automatic':
                         raise ValueError('Inventory incomplete; run inventory again first')
                     files = data['files']
                 quality_settings = read_settings(self.config)
+                if action == 'automatic':
+                    files = await self.automation.batch(files, quality_settings)
+                from .mirror_automation import prefetch_exclusion
+                if action == 'retry_failures' and (self.root/'inventory.json').exists():
+                    inventory = json.loads(await asyncio.to_thread((self.root/'inventory.json').read_text, encoding='utf-8'))
+                    known_items = {item['url']:item for item in inventory.get('files',[])}
+                    files = [known_items.get(item['url'], item) for item in files]
+                before_platform_filter = len(files)
+                excluded = [item for item in files if prefetch_exclusion(item, quality_settings)]
+                if action == 'retry_failures':
+                    for item in excluded:
+                        await self.clear_failure(item['url'])
+                files = [item for item in files if not prefetch_exclusion(item, quality_settings)]
+                self.job_state['platform_skipped'] = before_platform_filter - len(files)
+                self.job_state['prefetch_platform'] = quality_settings['prefetch_platform']
                 files.sort(key=lambda i: (i.get('priority', 0), self.quality.needs_cache(
                     i.get('path', ''), source_targets(quality_settings, i.get('path', ''), 'redirect'))), reverse=True)
                 await self.db.executemany('INSERT OR REPLACE INTO expected VALUES(?,?,?,?)',
@@ -925,7 +1113,14 @@ class Mirror:
                                          [(i['url'], i.get('priority', 0)) for i in files])
                 await self.db.execute('UPDATE objects SET priority=MAX(priority,COALESCE((SELECT MAX(p.priority) FROM cache c JOIN priorities p ON p.url=c.url WHERE c.object=objects.digest),0))')
                 await self.db.commit()
-                self.job_state.update(state='running', done=0, total=len(files), errors=0, failed=[], skipped=0, cached=0)
+                plan = {name: dict(files=0, known_bytes=0) for name in POLICIES}
+                for item in files:
+                    entry = plan[category_for(item['url'], item['category'])]
+                    entry['files'] += 1
+                    entry['known_bytes'] += item.get('size') or 0
+                self.job_state.update(state='running', phase='download', done=len(excluded), total=len(files)+len(excluded), errors=0,
+                                      failed=[], skipped=len(excluded), cached=0, reused=0, plan=plan,
+                                      skip_reasons=dict(redirect_policy=sum(prefetch_exclusion(item, quality_settings)=='redirect_policy' for item in excluded), source_mapping=0, cloud_paused=0))
                 remaining = iter(files)
                 disk_limited = False
                 async def fetch_item(item):
@@ -935,19 +1130,30 @@ class Mirror:
                     for attempt in range(3):
                         settings = read_settings(self.config)
                         category = category_for(item['url'], item['category'])
+                        if settings['qiniu_routes'][category]['mode'] == 'cloud' and settings['qiniu_paused']:
+                            self.job_state['skipped'] += 1
+                            self.job_state['skip_reasons']['cloud_paused'] += 1
+                            break
                         mapped = source_targets(settings, item.get('path', ''), 'redirect')
                         if (settings['policies'][category] not in ('cache', 'backup')
                                 or mapped and not self.quality.needs_cache(item.get('path', ''), mapped)):
                             self.job_state['skipped'] += 1
+                            reason = ('redirect_policy' if settings['policies'][category] not in ('cache', 'backup')
+                                      else 'source_mapping')
+                            self.job_state['skip_reasons'][reason] += 1
                             await self.clear_failure(item['url'])
                             break
                         try:
+                            existing = await self.cached(item['url'])
                             await self.ensure(item['url'])
                             await self.clear_failure(item['url'])
                             self.job_state['cached'] += 1
+                            if existing:
+                                self.job_state['reused'] += 1
                             break
-                        except web.HTTPInsufficientStorage:
+                        except web.HTTPInsufficientStorage as exc:
                             disk_limited = True
+                            self.job_state['error'] = '本机暂存达到容量或磁盘保留线，未处理文件留待下次同步。' + (exc.text or '')
                             return
                         except (web.HTTPException, OSError) as exc:
                             if attempt < 2 and getattr(exc, 'status', 502) not in (400, 404):
@@ -972,8 +1178,10 @@ class Mirror:
                 await asyncio.gather(*(worker() for _ in range(worker_count)))
                 if disk_limited:
                     self.job_state['state'] = 'disk_limit'
+                    self.automation.wait_capacity()
                     return
                 if action == 'refresh' and read_settings(self.config)['policies']['loaders'] in ('cache', 'backup'):
+                    self.job_state['phase'] = 'loader_metadata'
                     # Mutable loader feeds are small and independent of the vanilla catalogue.
                     async def refresh_loader(path):
                         try:
@@ -997,6 +1205,7 @@ class Mirror:
         except Exception as exc:
             logging.exception('Mirror job failed')
             self.job_state.update(state='failed', error=str(exc)[:240])
+            self.automation.state['next_at'] = time.time()+300
         finally:
             if action == 'refresh':
                 self.last_refresh = dict(at=time.time(), **self.job_state)
@@ -1006,8 +1215,16 @@ class Mirror:
         scheduled_interval = None
         last_nodes_check = 0
         last_source_check = 0
+        last_settings_stamp = None
         while True:
             settings = read_settings(self.config)
+            try:
+                stamp = settings_path(self.config).stat().st_mtime_ns
+            except OSError:
+                stamp = 0
+            if last_settings_stamp != stamp:
+                self.automation.state['next_at'] = 0
+                last_settings_stamp = stamp
             if (settings['auto_sources'] and time.time()-last_source_check>=60
                     and (self.source_job is None or self.source_job.done())):
                 self.source_job = asyncio.create_task(self.discover_sources())
@@ -1039,7 +1256,7 @@ class Mirror:
                 self.next_refresh, scheduled_interval = None, None
             else:
                 if scheduled_interval != interval or self.next_refresh is None:
-                    scheduled_interval, self.next_refresh = interval, time.time() + interval
+                    scheduled_interval, self.next_refresh = interval, time.time() + (interval if (self.root/'inventory.json').exists() else 0)
                 if time.time() >= self.next_refresh:
                     if self.job and not self.job.done():
                         self.refresh_deferred_at = time.time()
@@ -1049,6 +1266,16 @@ class Mirror:
                         self.job_state = dict(state='running', action='refresh', trigger='scheduled', started_at=time.time())
                         self.job = asyncio.create_task(self.run_job('refresh'))
                         self.next_refresh = time.time() + interval
+                if not self.job or self.job.done():
+                    due = await self.one('SELECT 1 FROM mirror_failed_files WHERE next_retry<=? LIMIT 1', (time.time(),))
+                    capacity_wait = (self.automation.state.get('state') == 'waiting_capacity'
+                                     and time.time() < self.automation.state['next_at'])
+                    action = ('retry_failures' if due and not capacity_wait else
+                              'automatic' if time.time() >= self.automation.state['next_at']
+                              and (self.root/'inventory.json').exists() else None)
+                    if action:
+                        self.job_state = dict(state='running', action=action, trigger='automatic', started_at=time.time())
+                        self.job = asyncio.create_task(self.run_job(action))
             await asyncio.sleep(5)
 
     async def discover_sources(self):
@@ -1094,6 +1321,8 @@ async def create_mirror(config):
     app.router.add_get('/_internal/control', mirror.control)
     app.router.add_post('/_internal/control', mirror.control)
     app.router.add_post('/room-cache/plan', mirror.room_cache.plan)
+    app.router.add_post('/room-cache/release', mirror.room_cache.release)
+    app.router.add_post('/room-cache/uploads/complete', mirror.cloud.direct.complete)
     app.router.add_post('/room-cache/resolve', mirror.room_cache.resolve)
     app.router.add_put('/room-cache/files/{digest:[0-9a-f]{64}}', mirror.room_cache.upload)
     app.router.add_get('/room-cache/files/{digest:[0-9a-f]{64}}', mirror.room_cache.download)

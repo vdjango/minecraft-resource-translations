@@ -1,9 +1,6 @@
 {
   "setup": [],
-  "admin-clients": [
-    "admin-records.js",
-    "admin.js"
-  ],
+  "admin-clients": [],
   "admin-feedback": [
     "admin.js"
   ],
@@ -14,31 +11,16 @@
   "admin-model": [
     "admin.js"
   ],
-  "admin-nodes": [
-    "admin.js",
-    "admin-nodes.js",
-    "admin-resource-overview.js"
-  ],
+  "admin-nodes": [],
   "admin-tasks": [
     "admin-records.js",
     "admin.js"
   ],
-  "admin-traffic": [
-    "admin.js",
-    "admin-traffic.js"
-  ],
-  "admin-usage": [
-    "admin-records.js",
-    "admin.js"
-  ],
-  "admin": [
-    "admin.js",
-    "admin-traffic.js",
-    "admin-resource-overview.js"
-  ],
+  "admin-traffic": [],
+  "admin-usage": [],
+  "admin": [],
   "developers": [
     "network-client.js",
-    "developers.js",
     "network.js"
   ],
   "docs": [
@@ -52,9 +34,5 @@
   "project": [
     "project.js"
   ],
-  "admin-mirror": [
-    "admin.js",
-    "admin-mirror.js",
-    "admin-mirror-cloud.js"
-  ]
+  "admin-mirror": []
 }

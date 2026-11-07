@@ -11,7 +11,7 @@ it('loads independent overview sections in parallel and preserves successful dat
   const overview=new Promise(resolve=>{finish=resolve;});
   const fetch=vi.fn((url:string)=>url.includes('/overview')?overview:Promise.resolve(reply({today:{requests:12,launcher_instances:3,reported_instances:2,estimated_instances:1,active_integrations:1,field_hit_ratio:1,ready_fields:4,fields:4}})));
   vi.stubGlobal('fetch',fetch);
-  const controller=new Function('pageViews',source('admin.js')+'\n'+source('admin-traffic.js')+'\nreturn {load};')({});
+  const controller=new Function('pageViews','scope','notifications',source('admin.js')+'\n'+source('admin-traffic.js')+'\nreturn {load};')({},{active:true},{notify:vi.fn()});
   const pending=controller.load();
   expect(fetch.mock.calls.map(c=>c[0])).toEqual(['/v1/admin/overview','/v1/admin/traffic?days=1']);
   await vi.waitFor(()=>expect(document.querySelectorAll('#traffic-summary .metric')).toHaveLength(4));
@@ -29,7 +29,7 @@ it('shows saved model and quotas while the provider directory stalls, and permit
   let finish!:(value:unknown)=>void;
   const models=new Promise(resolve=>{finish=resolve;});
   vi.stubGlobal('fetch',vi.fn((url:string)=>url.endsWith('/models')?models:Promise.resolve(reply({base_url:'https://provider.test/v1',model:'configured-model',reasoning_effort:'medium',daily_token_limit:1234,model_prices:{},api_key_configured:true}))));
-  const controller=new Function('pageViews',source('admin.js')+'\nreturn {load,refreshModels};')({});
+  const controller=new Function('pageViews','scope','notifications',source('admin.js')+'\nreturn {load,refreshModels};')({},{active:true},{notify:vi.fn()});
   await controller.load();
   expect((document.getElementById('model') as HTMLSelectElement).value).toBe('configured-model');
   expect((document.getElementById('daily-tokens') as HTMLInputElement).value).toBe('1234');

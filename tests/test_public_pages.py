@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import xml.etree.ElementTree as ET
 
 from test_platform import FakeModel, FakeSources, PlatformFixture
@@ -8,44 +9,48 @@ from mc_translate.public_pages import render_body
 
 
 class PublicPagesCase(PlatformFixture):
+    @staticmethod
+    def page_seed(document):
+        match = re.search(r'<script type="application/json" data-page-seed>(.*?)</script>', document, re.S)
+        assert match is not None
+        return json.loads(match.group(1))
+
     async def test_unified_platform_routes_and_shared_settings(self):
         for old, target in (("/network", "/developers#network"),
-                            ("/admin/mirror", "/admin/settings#downloads"),
                             ("/admin/model", "/admin/settings#translation")):
             response = await self.client.get(old, allow_redirects=False)
             self.assertEqual(response.status, 302)
             self.assertEqual(response.headers["Location"], target)
             self.assertIn("no-store", response.headers["Cache-Control"])
         homepage = await (await self.client.get("/")).text()
-        self.assertIn('id="projects"', homepage)
-        self.assertIn('href="/mirror"', homepage)
+        self.assertIn('vue-page-index.js', homepage)
+        self.assertIn('catalogueData', self.page_seed(homepage))
         self.assertNotIn('id="downloads"', homepage)
-        self.assertNotIn('游戏下载', homepage)
         mirror = await self.client.get('/mirror', allow_redirects=False)
         self.assertEqual(mirror.status, 200)
-        self.assertIn('id="mirror-connect"', await mirror.text())
+        self.assertIn('vue-page-mirror.js', await mirror.text())
+        mirror_admin = await self.client.get('/admin/mirror', allow_redirects=False)
+        self.assertEqual(mirror_admin.status, 200)
+        self.assertIn('vue-page-admin-mirror.js', await mirror_admin.text())
         settings = await (await self.client.get("/admin/settings")).text()
-        self.assertIn('id="settings"', settings)
-        self.assertIn('id="mirror-settings"', settings)
-        self.assertEqual(settings.count('id="admin-access"'), 1)
-        self.assertIn('id="panel" class="hidden"', settings)
+        self.assertIn('vue-page-admin-model.js', settings)
+        self.assertIn('authMode', self.page_seed(settings))
         self.assertIn('noindex', (await self.client.get('/admin/settings')).headers['X-Robots-Tag'])
 
     async def test_live_bootstrap_does_not_need_browser_health_round_trip(self):
         first = await (await self.client.get('/')).text()
         self.assertIn('<meta name="translation-hub" content="http://localhost">', first)
-        self.assertIn('id="service-state">翻译服务在线', first)
+        self.assertEqual(self.page_seed(first)['serviceState'], '翻译服务在线')
         self.config.api_key = ''
         second = await (await self.client.get('/')).text()
-        self.assertIn('id="service-state">译文查询在线 · 生成暂不可用', second)
-        self.assertNotIn('id="service-state">翻译服务在线', second)
+        self.assertEqual(self.page_seed(second)['serviceState'], '译文查询在线 · 生成暂不可用')
 
     async def translated(self):
         for name in ("summary", "body"):
             task = await self.ensure(self.payload(name), key="seo-ready-" + name)
             self.assertEqual((await self.done(task["results"][0]["tickets"][0]["job_id"]))["state"], "ready")
 
-    async def test_ready_detail_is_usable_and_html_contains_translation_without_javascript(self):
+    async def test_ready_detail_bootstraps_vue_with_translation(self):
         await self.translated()
         calls = FakeModel.calls, FakeSources.downloads
         catalogue = await (await self.client.get("/v1/catalog/projects")).json()
@@ -58,14 +63,16 @@ class PublicPagesCase(PlatformFixture):
         self.assertEqual(response.status, 200)
         self.assertIn("no-store", response.headers["Cache-Control"])
         self.assertEqual(response.headers["Cloudflare-CDN-Cache-Control"], "no-store")
-        self.assertIn("一个快速的模组", html)
+        seed = self.page_seed(html)
+        self.assertIn("一个快速的模组", seed['body'])
+        self.assertIn('<code>fabric</code>', seed['body'])
         self.assertIn('<code>fabric</code>', html)
         self.assertIn('rel="canonical" href="http://localhost/projects/modrinth/Fixture01"', html)
-        self.assertNotIn("{{BODY}}", html)
+        self.assertIn('vue-page-project.js', html)
         self.assertEqual(calls, (FakeModel.calls, FakeSources.downloads))
         response = await self.client.get("/")
-        self.assertIn('href="/projects/modrinth/Fixture01"', await response.text())
-        self.assertIn("中文", await (await self.client.get("/")).text())
+        catalogue = json.loads(self.page_seed(await response.text())['catalogueData'])
+        self.assertEqual(catalogue['projects'][0]['resource']['project_id'], 'Fixture01')
 
     async def test_source_update_invalidates_etag_and_never_calls_old_translation_ready(self):
         await self.translated()

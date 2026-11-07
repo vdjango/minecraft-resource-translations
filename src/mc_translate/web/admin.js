@@ -5,21 +5,22 @@ function node(tag, text) { const e = document.createElement(tag); e.textContent 
 const errors = {unauthorized:"管理会话已过期，请重新登录。", invalid_settings:"配置格式有误，请检查表单；三项价格需一起填写或全部留空。", model_list_unavailable:"服务商模型列表读取失败，请稍后重试。", model_key_required:"更换服务商后，请填写对应 API Key 再读取模型。", model_not_configured:"请先填写服务商 API Key。", mail_disabled:"请先保存并开启邮件通知。", rate_limited:"操作过于频繁，请稍后再试。", cursor_expired:"分页已过期，请刷新列表。"};
 async function api(path, body, method) {
   try {
-  const response = await fetch("/" + path.replace(/^\//,""), {signal:AbortSignal.timeout(8000),method:method || (body ? "POST" : "GET"), credentials:"same-origin", headers:{...(token ? {Authorization:"Bearer " + token} : {}), "Content-Type":"application/json"}, ...(body ? {body:JSON.stringify(body)} : {})});
+  const actionTimeout=body?.action==="cloud_test"?90000:body?.action==="cloud_migrate"||body?.action==="room_catalog_import"?40000:body?30000:20000;
+  const response = await fetch("/" + path.replace(/^\//,""), {signal:AbortSignal.timeout(actionTimeout),method:method || (body ? "POST" : "GET"), credentials:"same-origin", headers:{...(token ? {Authorization:"Bearer " + token} : {}), "Content-Type":"application/json"}, ...(body ? {body:JSON.stringify(body)} : {})});
   const data = await response.json();
   if (!response.ok) {
     if (response.status === 401 && !token) authenticated(false);
-    const error=Error(errors[data.code] || ({task_not_found:"任务不存在，请刷新列表。",task_not_retryable:"该任务当前无需重试，请刷新查看。",queue_full:"队列已满，请稍后重试。"})[data.code] || "操作失败，请稍后重试。");
+    const error=Error(data.message || errors[data.code] || ({task_not_found:"任务不存在，请刷新列表。",task_not_retryable:"该任务当前无需重试，请刷新查看。",queue_full:"队列已满，请稍后重试。"})[data.code] || "操作失败，请稍后重试。");
     error.status=response.status;error.code=data.code;throw error;
   }
   return data;
   } catch(error) {
-    if(error.name==="TimeoutError"||error.name==="AbortError")throw Error("连接超时，请点击刷新重试；已显示的数据仍保留。");
+    if(error.name==="TimeoutError")throw Error("读取后台数据超时；已显示的数据仍保留，后台任务继续运行。请刷新重试。");
     throw error;
   }
 }
-function message(text, error=false) { $("message").textContent = text; $("message").classList.toggle("error", error); }
-function showError(error) { message(error.message, true); }
+function message(text, error=false, notify=true) { if(!scope.active)return;const host=$("message");if(host){host.textContent = text;host.classList.toggle("error", error);} if(notify)notifications.notify(text,error); }
+function showError(error) { if(error.name!=="AbortError")message(error.message, true); }
 function loading(hostId,buttonId,busy) {
   const host=$(hostId),button=$(buttonId);
   if(host){host.setAttribute("aria-busy",String(busy));if(busy&&!host.childElementCount){const hint=node("p","正在加载，请稍候…");hint.className="record-empty";hint.dataset.loading="true";host.append(hint);}if(!busy)host.querySelectorAll("[data-loading]").forEach(e=>e.remove());}
@@ -125,7 +126,7 @@ async function loadUsage(append=false) {
   } finally {if(version===usageRequest)loading("usage-calls","refresh-usage",false);}
 }
 async function load() {
-  message("正在更新数据…");
+  message("正在更新数据…",false,false);
   const requests=[];
   if ($("mirror-state")) requests.push(loadMirror());
   if ($("resource-overview")) requests.push(loadResourceOverview());
@@ -148,9 +149,9 @@ async function load() {
   }));
   const results=await Promise.allSettled(requests),failed=results.filter(result=>result.status==="rejected");
   if(failed.length)message([...new Set(failed.map(result=>result.reason.message))].join(" "),true);
-  else message("数据已更新。");
+  else message("数据已更新。",false,false);
 }
-function authenticated(value) { $("panel").classList.toggle("hidden",!value);pageViews.adminAccess.visible(!value);$("logout").classList.toggle("hidden",!value); }
+function authenticated(value) { pageViews.adminAccess.authenticated(value);$("panel").classList.toggle("hidden",!value);$("logout").classList.toggle("hidden",!value); }
 $("logout").onclick=async () => {try {await api("v1/admin/session",undefined,"DELETE"); token=""; location.reload();} catch(error) {showError(error);} };
 if ($("refresh-dashboard")) $("refresh-dashboard").onclick=() => load().catch(showError);
 if ($("refresh-tasks")) { $("refresh-tasks").onclick=() => loadTasks().catch(showError); $("task-filter").onchange=() => loadTasks().catch(showError); }
@@ -181,7 +182,7 @@ if ($("settings")) {
   };
 }
 async function bootstrap() {
-  pageViews.adminAccess.mount({session:'/v1/admin/session',login:'/v1/admin/session',setup:'/v1/admin/setup',mode:$("admin-access").dataset.mode,
+  pageViews.adminAccess.mount({session:'/v1/admin/session',login:'/v1/admin/session',setup:'/v1/admin/setup',mode:pageSeed.authMode||'login',
     authorized(){authenticated(true);void load().catch(showError);}});
 }
 async function retryTask(task, button) {

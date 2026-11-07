@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minecraft-translation-platform"
-version = "0.1.5"
+version = "0.1.6"
 description = "Shared, versioned Minecraft resource translations"
 license = {file = "LICENSE"}
 keywords = ["minecraft", "translation", "launcher", "federation"]
-classifiers = ["Development Status :: 4 - Beta", "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)", "Programming Language :: Python :: 3.11", "Programming Language :: Python :: 3.12", "Topic :: Internet :: WWW/HTTP :: HTTP Servers"]
+classifiers = ["Development Status :: 5 - Production/Stable", "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)", "Programming Language :: Python :: 3.11", "Programming Language :: Python :: 3.12", "Topic :: Internet :: WWW/HTTP :: HTTP Servers"]
 requires-python = ">=3.11"
 dependencies = ["aiohttp>=3.11,<4", "aiosqlite>=0.21,<1", "bleach>=6.2,<7", "jsonschema>=4.23,<5", "markdown-it-py>=3,<5"]
 

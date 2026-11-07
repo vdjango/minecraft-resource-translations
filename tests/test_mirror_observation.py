@@ -59,7 +59,7 @@ class ObservationCase(unittest.IsolatedAsyncioTestCase):
                                    ('room-a', digest, f'mods/file{index}.jar', 2048, None, '[]', 1, 'source_unavailable', now-index, now+3600))
         await cache.db.execute('INSERT INTO files(scope,digest,path,size,sha1,urls,need,reason,touched,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?)',
                                ('room-b', f'{0:064x}', 'mods/file0.jar', 2048, None, '[]', 1, 'source_unavailable', now, now+3600))
-        await cache.db.execute('INSERT INTO objects VALUES(?,?,?)', (f'{0:064x}', 2048, now))
+        await cache.db.execute('INSERT INTO objects(digest,size,created) VALUES(?,?,?)', (f'{0:064x}', 2048, now))
         await cache.db.commit()
         first = await room_files(cache, {})
         self.assertEqual(len(first['files']), 50)
@@ -76,6 +76,15 @@ class ObservationCase(unittest.IsolatedAsyncioTestCase):
         await self.mirror.observation.open()
         history = (await self.mirror.observation.snapshot())['history']
         self.assertEqual(history[0]['state'], 'interrupted')
+
+    async def test_expired_room_files_are_hidden_before_cleanup_and_leave_no_history(self):
+        cache=self.mirror.room_cache
+        await cache.db.execute('INSERT INTO files(scope,digest,path,size,urls,touched,lease_until) VALUES(?,?,?,?,?,?,?)',
+            ('expired-room','e'*64,'mods/expired.jar',10,'[]',time.time(),time.time()-1))
+        await cache.db.commit()
+        self.assertEqual((await room_files(cache,{}))['files'],[])
+        await cache.cleanup()
+        self.assertEqual((await cache.one('SELECT COUNT(*) n FROM files'))['n'],0)
 
 
 if __name__ == '__main__':

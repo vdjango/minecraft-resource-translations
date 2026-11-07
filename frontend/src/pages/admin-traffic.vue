@@ -1,28 +1,5 @@
 <script setup lang="ts">
-import SiteNav from '../SiteNav.vue';
-import AdminNav from '../AdminNav.vue';
-import AdminAccess from '../AdminAccess.vue';
+import AdminOverview from '../AdminOverview.vue';
 defineProps<{seed:Record<string,string>;views:any}>();
 </script>
-
-<template>
-<SiteNav />
-<main class="admin-shell">
-<AdminNav />
-<div class="admin-content">
-<header class="admin-header"><div><div class="eyebrow">PLATFORM MANAGEMENT</div><h1 id="page-title">访问统计</h1><p class="muted">查看访问规模、翻译命中率与查询性能。</p></div><button id="logout" type="button" class="secondary hidden">退出管理</button></header>
-<section id="admin-access" :data-mode="seed.authMode" class="admin-access-host"><AdminAccess v-if="views.access.options" :options="views.access.options" :visible="views.access.visible" /></section><p id="message" class="admin-message" role="status" aria-live="polite"></p>
-<div id="panel" class="hidden">
-<section id="traffic-dashboard" class="admin-section records-page">
-  <div class="records-toolbar"><div><h2>服务访问统计</h2><p id="traffic-health">正在加载统计…</p></div><div class="records-controls"><label for="traffic-days">趋势范围</label><select id="traffic-days"><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="1">今天</option></select><button id="refresh-traffic" class="secondary" type="button">刷新统计</button></div></div>
-  <div id="traffic-metrics" class="admin-metrics compact-metrics" aria-label="今日服务指标"></div>
-  <div class="traffic-charts"><section class="admin-card"><h3>今日每小时请求</h3><div id="traffic-hourly"></div></section><section class="admin-card"><h3>每日请求趋势</h3><div id="traffic-daily"></div></section></div>
-  <div class="traffic-tables">
-    <section class="records-panel"><div class="records-panel-title"><h3>今日接口表现</h3><span>p95 为服务端分桶上界</span></div><div class="traffic-table-head" aria-hidden="true"><span>接口</span><span>请求</span><span>错误</span><span>p95</span></div><div id="traffic-endpoints" aria-label="接口统计"></div></section>
-    <section class="records-panel"><div class="records-panel-title"><h3>今日接入应用</h3><span>请求最多的 10 个应用</span></div><div class="traffic-table-head" aria-hidden="true"><span>应用</span><span>请求</span><span>错误</span><span>命中字段 / 查询字段</span></div><div id="traffic-clients" aria-label="接入应用统计"></div></section>
-  </div>
-  <section class="admin-card traffic-notes"><h3>这些数字如何统计</h3><p>接入应用按应用密钥去重，一个应用可能对应许多用户。启动器实例优先使用客户端上报的匿名实例标识；尚未上报时，根据当日网络地址、客户端标识和应用组合估算，共享网络与版本变化会影响准确性。</p><p>字段命中率表示查询结果可直接提供译文的比例；模型调用是另外统计的实际生成请求。p95 使用固定延迟桶的上界，包含服务端处理和等待，不包含用户到服务器的网络往返、首次模型生成耗时或客户端本地缓存。</p><p>仅统计到达本服务的公共翻译 API。CDN 缓存命中、启动器本地命中、管理页面和健康检查不计入；不保存原始 IP、设备标识、User-Agent 或密钥。聚合统计每 5 秒写入，异常断电可能丢失尚未落库的短暂数据。</p><p id="traffic-coverage" class="muted"></p></section>
-</section>
-</div></div></main>
-<dialog id="review-dialog"><form id="review-form"><div class="section-caption">CLIENT QUOTA</div><h2 id="review-name">批准申请</h2><p class="muted small">独立额度仍受平台全局预算及 IP 防滥用限额约束。</p><input id="review-id" type="hidden"><label>每小时翻译字段数<input id="review-fields" type="number" min="1" max="100000" required></label><label>每分钟请求数<input id="review-rpm" type="number" min="1" max="10000" required></label><div class="action-row"><button type="button" id="review-cancel" class="secondary">取消</button><button type="submit">确认启用</button></div></form></dialog>
-</template>
+<template><AdminOverview :seed="seed" :views="views"/></template>

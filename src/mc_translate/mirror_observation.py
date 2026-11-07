@@ -34,6 +34,8 @@ class MirrorObservation:
     def __init__(self, mirror):
         self.mirror = mirror
         self.transfers = {}
+        from .mirror_inventory_view import InventoryView
+        self.inventory_view = InventoryView(mirror)
 
     async def open(self):
         db = self.mirror.db
@@ -65,20 +67,28 @@ class MirrorObservation:
         async with self.mirror.db.execute('SELECT COUNT(*) count FROM mirror_failed_files') as cursor:
             failed_count = (await cursor.fetchone())['count']
         async with self.mirror.db.execute(
-                'SELECT url,category,status,error,attempts,last_failed FROM mirror_failed_files ORDER BY last_failed DESC LIMIT 8') as cursor:
+                'SELECT url,category,status,error,attempts,last_failed,next_retry FROM mirror_failed_files ORDER BY next_retry ASC LIMIT 50') as cursor:
             failed_files = [dict(row) for row in await cursor.fetchall()]
         now = time.time()
         active = [dict(url=url, **row, speed=row['bytes'] / max(now-row['started_at'], .1))
                   for url, row in list(self.transfers.items())[:16]]
         return dict(transfers=active, history=history,
-                    failed_queue=dict(count=failed_count, files=failed_files),
+                    failed_queue=dict(count=failed_count, files=failed_files,
+                        next_retry=min((r['next_retry'] for r in failed_files), default=None)),
                     source_scanning=bool(self.mirror.source_job and not self.mirror.source_job.done()),
-                    source_scan=dict(self.mirror.source_scan_state),
+                    source_scan={**self.mirror.source_scan_state, 'progress': self.mirror.discovery.progress},
                     reserved_bytes=self.mirror.reserved, observed_at=now)
 
     async def files(self, data):
         query, category, cursor = page_arguments(data)
         where, args = [], []
+        storage = data.get('storage', '')
+        if storage not in ('', 'local', 'cloud'):
+            raise ValueError('invalid storage filter')
+        if storage == 'local':
+            where.append('o.local=1')
+        elif storage == 'cloud':
+            where.append("EXISTS(SELECT 1 FROM object_locations sl WHERE sl.scope='mirror' AND sl.digest=c.object AND sl.state='ready')")
         if query:
             where.append('(instr(lower(c.url),?)>0 OR instr(c.sha1,?)>0 OR instr(c.object,?)>0)')
             args.extend([query.lower()] * 3)
@@ -114,7 +124,8 @@ class MirrorObservation:
 
 async def room_files(cache, data):
     query, _, cursor = page_arguments(data)
-    where, args = [], []
+    where = ['(f.lease_until>? OR (f.lease_until=0 AND f.touched>?))']
+    args = [time.time(), time.time()-cache.settings()['room_cache_ttl_hours']*3600]
     if query:
         where.append('(instr(lower(f.path),?)>0 OR instr(f.digest,?)>0 OR instr(f.sha1,?)>0)')
         args.extend([query.lower()] * 3)
@@ -144,7 +155,7 @@ async def room_files(cache, data):
     for row in rows:
         digest = row['digest']
         row['cloud_profiles'] = locations.get(digest)
-        row['state'] = ('uploading' if digest in cache.uploading else 'cached' if row['stored_bytes'] is not None
+        row['state'] = ('uploading' if digest in cache.uploading else 'cached' if row['stored_bytes'] or locations.get(digest)
                         else 'expired' if row['expires_at'] and row['expires_at'] <= now
                         else 'awaiting_upload' if row['needed'] else 'redirect')
         row['readers'] = cache.serving.get(digest, 0)

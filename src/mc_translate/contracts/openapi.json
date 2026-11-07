@@ -1185,15 +1185,48 @@
         "operationId": "projectDetail",
         "summary": "Read current stored source and usable summary/body translations together; no upstream or model calls.",
         "parameters": [
-          {"name": "provider", "in": "path", "required": true, "schema": {"type": "string", "enum": ["modrinth", "curseforge"]}},
-          {"name": "project_id", "in": "path", "required": true, "schema": {"type": "string"}},
-          {"name": "target_language", "in": "query", "schema": {"type": "string", "default": "zh-Hans"}}
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "modrinth",
+                "curseforge"
+              ]
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_language",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "zh-Hans"
+            }
+          }
         ],
         "responses": {
-          "200": {"description": "source, target_language, and fields using the resolve field structure. Ready fields include translation.text (including body); only display ready when state=ready and is_current=true."},
-          "404": {"description": "project_not_indexed"},
-          "429": {"description": "Rate limit; obey Retry-After"},
-          "503": {"description": "project_updating; retry after Retry-After"}
+          "200": {
+            "description": "source, target_language, and fields using the resolve field structure. Ready fields include translation.text (including body); only display ready when state=ready and is_current=true."
+          },
+          "404": {
+            "description": "project_not_indexed"
+          },
+          "429": {
+            "description": "Rate limit; obey Retry-After"
+          },
+          "503": {
+            "description": "project_updating; retry after Retry-After"
+          }
         }
       }
     },
@@ -1379,8 +1412,8 @@
         ]
       },
       "post": {
-        "operationId": "adminReviewClient",
-        "summary": "adminReviewClient",
+        "operationId": "adminManageClientKeys",
+        "summary": "Create an active client key or update an existing key",
         "responses": {
           "200": {
             "description": "Success",
@@ -1403,6 +1436,9 @@
           },
           "429": {
             "description": "Rate limit; obey Retry-After"
+          },
+          "201": {
+            "description": "New key; access_token is shown once"
           }
         },
         "security": [
@@ -1415,48 +1451,14 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ClientReview"
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/clients/applications": {
-      "post": {
-        "operationId": "applyForClientKey",
-        "summary": "applyForClientKey",
-        "responses": {
-          "201": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ClientReceipt"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "401": {
-            "description": "Missing/invalid credential"
-          },
-          "403": {
-            "description": "Key awaiting approval or revoked"
-          },
-          "429": {
-            "description": "Rate limit; obey Retry-After"
-          }
-        },
-        "security": [],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ClientApplication"
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ClientReview"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ClientKeyCreate"
+                  }
+                ]
               }
             }
           }
@@ -4809,6 +4811,20 @@
           "output_tokens": {
             "type": "integer"
           },
+          "write_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cost_basis": {
+            "enum": [
+              "unknown",
+              "official",
+              "official_estimate",
+              "official_backfill",
+              "custom",
+              "custom_estimate"
+            ]
+          },
           "details_known": {
             "type": "integer"
           },
@@ -5165,6 +5181,46 @@
           "heartbeat_seconds": {
             "type": "integer",
             "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "ClientKeyCreate": {
+        "type": "object",
+        "required": [
+          "action",
+          "name"
+        ],
+        "properties": {
+          "action": {
+            "const": "create"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "contact": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "website": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "purpose": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "fields_per_hour": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "requests_per_minute": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
           }
         },
         "additionalProperties": false

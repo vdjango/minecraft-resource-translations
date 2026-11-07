@@ -77,7 +77,7 @@ class FederationCase(PlatformFixture):
         mirror=await self.mirror()
         html = await (await mirror.get('/')).text()
         self.assertIn('name="translation-hub" content="' + self.config.public_url + '"', html)
-        self.assertIn('id="service-state">译文节点在线', html)
+        self.assertEqual(json.loads(html.split('data-page-seed>',1)[1].split('</script>',1)[0])['serviceState'], '译文节点在线')
         response=await mirror.post('/v1/translations:resolve',json=self.payload(),headers={'Authorization':'Bearer bct_caller-secret-never-forwarded'})
         self.assertEqual(response.status,200,await response.text())
         result=await response.json()

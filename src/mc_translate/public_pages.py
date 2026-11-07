@@ -25,6 +25,7 @@ PUBLIC = {key: (value["title"], value["description"]) for key, value in SEO["pag
 
 
 def metadata(title, description, url, keywords=""):
+    verification = '<meta name="baidu-site-verification" content="codeva-qOlOp7MRLB" />' if url == "https://mirror.bugg.icu/" else ""
     graph = {"@context": "https://schema.org", "@graph": [
         {"@type": "SoftwareApplication", "@id": SEO["product"], "name": "Buggcraft", "alternateName": "BUGG启动器",
          "url": "https://bugg.icu/", "applicationCategory": "GameApplication", "operatingSystem": "Windows, macOS, Linux",
@@ -32,7 +33,7 @@ def metadata(title, description, url, keywords=""):
         {"@type": "WebPage", "@id": url+"#page", "url": url, "name": title, "description": description,
          "about": {"@id": SEO["product"]}}]}
     structured = json.dumps(graph, ensure_ascii=False).replace("<", "\\u003c")
-    return (f'<title>{escape(title)}</title><meta name="description" content="{escape(description, quote=True)}">'
+    return (verification + f'<title>{escape(title)}</title><meta name="description" content="{escape(description, quote=True)}">'
             f'<meta name="keywords" content="{escape(keywords, quote=True)}">'
             f'<link rel="canonical" href="{escape(url, quote=True)}">'
             f'<meta property="og:type" content="website"><meta property="og:title" content="{escape(title, quote=True)}">'

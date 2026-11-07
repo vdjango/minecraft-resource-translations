@@ -138,8 +138,6 @@ def secure_response(request, response):
         response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
         if re.fullmatch(r"/assets/vue-runtime-[A-Za-z0-9_-]+\.js", request.path) or re.fullmatch(r"[a-f0-9]{12}", request.query.get('v', '')):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-    if request.path == "/developers" or request.path == "/v1/clients/applications":
-        response.set_cookie("translation_device", request.app["api"].device(request), max_age=31536000, httponly=True, secure=request.app["api"].config.public_url.startswith("https:"), samesite="Lax")
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = (
         "Authorization, Content-Type, Idempotency-Key, Last-Event-ID, X-Translation-Instance"
@@ -250,17 +248,30 @@ class API:
         if not (token_auth or cookie_auth):
             raise ApiError("unauthorized", 401)
         if cookie_auth and request.method in ("POST", "DELETE"):
-            origin = request.headers.get("Origin")
-            if origin and origin not in (self.config.public_url.rstrip("/"), request.scheme + "://" + request.host):
+            if not self.admin_origin_allowed(request):
                 raise ApiError("invalid_origin", 403)
+
+    def admin_origin_allowed(self, request):
+        origin = request.headers.get('Origin')
+        if not origin:
+            return True
+        # Only the trusted local reverse proxy may supply the external scheme.
+        scheme = request.scheme
+        if self.config.trusted_proxy and request.remote in ('127.0.0.1', '::1'):
+            forwarded = request.headers.get('X-Forwarded-Proto')
+            if forwarded in ('http', 'https'):
+                scheme = forwarded
+        from .mirror import read_settings
+        return origin in (self.config.public_url.rstrip('/'),
+                          scheme + '://' + request.host,
+                          read_settings(self.config, effective=False)['public_url'].rstrip('/'))
 
     def admin_identity(self):
         return key_hash(self.admin_accounts.state.get('admin_hash') or self.config.admin_token)
 
     async def admin_setup(self,request):
         self.rate(request,'admin_setup',8,300)
-        origin=request.headers.get('Origin')
-        if origin and origin not in (self.config.public_url.rstrip('/'),request.scheme+'://'+request.host):
+        if not self.admin_origin_allowed(request):
             raise ApiError('invalid_origin',403)
         if self.admin_login_lock.locked():raise ApiError('authentication_busy',429,2)
         data=await request.json()
@@ -299,22 +310,13 @@ class API:
                 self.require_admin(request)
             else:
                 self.rate(request,'admin_login',8,300)
-                origin=request.headers.get('Origin')
-                if origin and origin not in (self.config.public_url.rstrip('/'),request.scheme+'://'+request.host):raise ApiError('invalid_origin',403)
+                if not self.admin_origin_allowed(request):raise ApiError('invalid_origin',403)
                 data=await request.json()
                 if self.admin_login_lock.locked():raise ApiError('authentication_busy',429,2)
                 async with self.admin_login_lock:
                     valid=await asyncio.to_thread(verify_password,data.get('password'),self.admin_accounts.state.get('admin_hash',''))
                 if not valid or data.get('username')!=self.admin_accounts.state.get('admin_user'):raise ApiError('unauthorized',401)
             return self.admin_cookie()
-
-    def device(self, request):
-        cookie = request.cookies.get("translation_device", "")
-        value, _, signature = cookie.partition(".")
-        if re.fullmatch(r"[a-f0-9]{32}", value) and hmac.compare_digest(hmac.new(self.cursor_key, value.encode(), "sha256").hexdigest(), signature):
-            return cookie
-        value = secrets.token_hex(16) if request.method == "GET" else "0" * 32
-        return value + "." + hmac.new(self.cursor_key, value.encode(), "sha256").hexdigest()
 
     async def admin_settings(self, request):
         self.require_admin(request)
@@ -452,70 +454,6 @@ class API:
         }.get(result["state"], "")
         return result
 
-    async def client_apply(self, request):
-        self.rate(request, "applications", 30, 3600)
-        day, _ = billing_period()
-        bucket = key_hash(self.ip(request) + ":" + self.device(request))
-        async with self.store.transaction() as db:
-            row = await (await db.execute("SELECT count FROM application_attempts WHERE device=? AND day=?", (bucket, day))).fetchone()
-            if row and row[0] >= 3:
-                from datetime import datetime, timedelta
-
-                from .store import LOCAL_TZ
-                reset = (datetime.now(LOCAL_TZ) + timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
-                raise ApiError("application_daily_limit", 429, max(1, int(reset-time.time())))
-            await db.execute("INSERT INTO application_attempts VALUES(?,?,1) ON CONFLICT(device,day) DO UPDATE SET count=count+1", (bucket, day))
-            await db.execute("DELETE FROM application_attempts WHERE day<?", (billing_period(time.time()-7*86400)[0],))
-        data = await request.json()
-        if not isinstance(data, dict) or set(data) - {"name", "contact", "website", "purpose"} or not {"name", "contact", "purpose"} <= set(data):
-            raise ApiError("invalid_request")
-        data.setdefault("website", "")
-        for name, maximum in (
-            ("name", 100),
-            ("contact", 200),
-            ("website", 500),
-            ("purpose", 1000),
-        ):
-            if (
-                not isinstance(data[name], str)
-                or (name != "website" and not data[name].strip())
-                or len(data[name]) > maximum
-            ):
-                raise ApiError("invalid_request")
-        token, identity, stamp = (
-            "bct_" + secrets.token_urlsafe(32),
-            "client_" + secrets.token_hex(12),
-            time.time(),
-        )
-        async with self.store.transaction() as db:
-            await db.execute(
-                "INSERT INTO client_keys(id,hash,prefix,name,contact,website,purpose,created,updated) VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    identity,
-                    key_hash(token),
-                    token[:12],
-                    data["name"],
-                    data["contact"],
-                    data["website"],
-                    data["purpose"],
-                    stamp,
-                    stamp,
-                ),
-            )
-            await enqueue(
-                db, "application:" + identity, dict(data, application_id=identity)
-            )
-        self.app["mail"].wake.set()
-        return web.json_response(
-            dict(
-                application_id=identity,
-                access_token=token,
-                state="pending",
-                notice="密钥仅显示一次，请保存；管理员批准后启用。",
-            ),
-            status=201,
-        )
-
     async def client_status(self, request):
         client = request.get("client_key")
         if not client:
@@ -530,6 +468,31 @@ class API:
         self.require_admin(request)
         if request.method == "POST":
             data = await request.json()
+            if isinstance(data, dict) and data.get("action") == "create":
+                if set(data) - {"action", "name", "contact", "website", "purpose", "fields_per_hour", "requests_per_minute"}:
+                    raise ApiError("invalid_request")
+                name = data.get("name", "")
+                contact = data.get("contact", "")
+                website = data.get("website", "")
+                purpose = data.get("purpose", "")
+                for value, maximum in ((name, 100), (contact, 200), (website, 500), (purpose, 1000)):
+                    if not isinstance(value, str) or len(value) > maximum:
+                        raise ApiError("invalid_request")
+                if not name.strip():
+                    raise ApiError("invalid_request")
+                fields = data.get("fields_per_hour", 1000)
+                requests = data.get("requests_per_minute", 600)
+                if type(fields) is not int or not 1 <= fields <= 100000 or type(requests) is not int or not 1 <= requests <= 10000:
+                    raise ApiError("invalid_request")
+                token = "bct_" + secrets.token_urlsafe(32)
+                identity = "client_" + secrets.token_hex(12)
+                stamp = time.time()
+                async with self.store.transaction() as db:
+                    await db.execute(
+                        "INSERT INTO client_keys(id,hash,prefix,name,contact,website,purpose,state,fields_per_hour,requests_per_minute,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (identity, key_hash(token), token[:12], name.strip(), contact.strip(), website.strip(), purpose.strip(), "active", fields, requests, stamp, stamp),
+                    )
+                return web.json_response({"id": identity, "access_token": token, "state": "active"}, status=201, headers={"Cache-Control": "no-store"})
             if (
                 not isinstance(data, dict)
                 or not {"id", "state"} <= set(data)
@@ -1673,6 +1636,7 @@ async def create_app(
     app["store"] = store
     app["http"] = session
     from .public_pages import PublicPages
+    from .spa_shell import render_shell
 
     public_pages = PublicPages(api, ROOT / "web")
     from .mirror_control import MirrorControl
@@ -1687,6 +1651,7 @@ async def create_app(
     app.router.add_post('/v1/setup/finish', installation.finish)
     app.router.add_get('/v1/admin/mirror', mirror_control.admin)
     app.router.add_post('/v1/admin/mirror', mirror_control.admin)
+    app.router.add_get('/v1/admin/mirror/certificate', mirror_control.certificate)
     app.router.add_get('/v1/admin/room-cache/nodes', mirror_control.room_nodes)
     app.router.add_post('/v1/admin/room-cache/nodes', mirror_control.room_nodes)
     app.router.add_get('/mirror-api/status', mirror_control.status)
@@ -1730,7 +1695,7 @@ async def create_app(
     app.router.add_post("/v1/admin/setup", api.admin_setup)
     app.router.add_get("/v1/admin/session", api.admin_session)
     app.router.add_delete("/v1/admin/session", api.admin_session)
-    app.router.add_post("/v1/clients/applications", api.client_apply)
+    # Existing issued keys remain valid; new clients are created by administrators.
     app.router.add_get("/v1/clients/application", api.client_status)
     app.router.add_get(
         "/openapi.json", lambda r: web.FileResponse(ROOT / "contracts/openapi.json")
@@ -1750,35 +1715,36 @@ async def create_app(
             return web.Response(status=302, headers={"Location": target, "Cache-Control": "no-store"})
         app.router.add_get(old, platform_redirect)
     for route, file in (
-        ("/", "index.html"),
-        ("/mirror", "mirror.html"),
-        ("/docs", "docs.html"),
-        ("/admin", "admin.html"),
-        ("/admin/setup", "admin.html"),
-        ("/admin/settings", "admin-model.html"),
-        ("/admin/mirror", "admin-mirror.html"),
-        ("/admin/mirror/resources", "admin-mirror.html"),
-        ("/admin/mirror/tasks", "admin-mirror.html"),
-        ("/admin/mirror/temporary", "admin-mirror.html"),
-        ("/admin/mirror/sources", "admin-mirror.html"),
-        ("/admin/mirror/quality", "admin-mirror.html"),
-        ("/admin/mirror/settings", "admin-mirror.html"),
-        ("/admin/mirror/settings/downloads", "admin-mirror.html"),
-        ("/admin/mirror/settings/storage", "admin-mirror.html"),
-        ("/admin/mirror/settings/cloud", "admin-mirror.html"),
-        ("/admin/mirror/settings/distribution", "admin-mirror.html"),
-        ("/admin/mirror/settings/sources", "admin-mirror.html"),
-        ("/admin/mirror/settings/quality", "admin-mirror.html"),
-        ("/admin/mirror/settings/room-cache", "admin-mirror.html"),
-        ("/admin/mirror/settings/cloudflare", "admin-mirror.html"),
-        ("/admin/mail", "admin-mail.html"),
-        ("/admin/clients", "admin-clients.html"),
-        ("/admin/tasks", "admin-tasks.html"),
-        ("/admin/usage", "admin-usage.html"),
-        ("/admin/traffic", "admin-traffic.html"),
-        ("/admin/nodes", "admin-nodes.html"),
-        ("/admin/feedback", "admin-feedback.html"),
-        ("/developers", "developers.html"),
+        ("/", "index"),
+        ("/mirror", "mirror"),
+        ("/docs", "docs"),
+        ("/admin", "admin"),
+        ("/admin/setup", "admin"),
+        ("/admin/settings", "admin-model"),
+        ("/admin/mirror", "admin-mirror"),
+        ("/admin/mirror/resources", "admin-mirror"),
+        ("/admin/mirror/tasks", "admin-mirror"),
+        ("/admin/mirror/transfers", "admin-mirror"),
+        ("/admin/mirror/temporary", "admin-mirror"),
+        ("/admin/mirror/sources", "admin-mirror"),
+        ("/admin/mirror/quality", "admin-mirror"),
+        ("/admin/mirror/settings", "admin-mirror"),
+        ("/admin/mirror/settings/downloads", "admin-mirror"),
+        ("/admin/mirror/settings/storage", "admin-mirror"),
+        ("/admin/mirror/settings/cloud", "admin-mirror"),
+        ("/admin/mirror/settings/distribution", "admin-mirror"),
+        ("/admin/mirror/settings/sources", "admin-mirror"),
+        ("/admin/mirror/settings/quality", "admin-mirror"),
+        ("/admin/mirror/settings/room-cache", "admin-mirror"),
+        ("/admin/mirror/settings/cloudflare", "admin-mirror"),
+        ("/admin/mail", "admin-mail"),
+        ("/admin/clients", "admin-clients"),
+        ("/admin/tasks", "admin-tasks"),
+        ("/admin/usage", "admin-usage"),
+        ("/admin/traffic", "admin-traffic"),
+        ("/admin/nodes", "admin-nodes"),
+        ("/admin/feedback", "admin-feedback"),
+        ("/developers", "developers"),
     ):
 
         async def page(request, file=file):
@@ -1788,9 +1754,9 @@ async def create_app(
                 session=api.admin_sessions.get(key_hash(request.cookies.get('translation_admin','')))
                 authorized=bool(session and session[0]>time.time() and session[1]==api.admin_identity())
                 if authorized and request.path!='/admin/setup':mode='session'
-                html=(ROOT/'web'/file).read_text(encoding='utf-8').replace('{{AUTH_MODE}}',mode).replace('{{AUTH_TITLE}}','设置管理员账户' if mode=='setup' else '登录管理工作台')
-                if mode=='session':
-                    html=html.replace('id="admin-access"','id="admin-access" hidden').replace('id="panel" class="hidden"','id="panel"').replace('id="logout" type="button" class="secondary hidden"','id="logout" type="button" class="secondary"')
+                title='设置管理员账户' if mode=='setup' else '管理后台'
+                html=render_shell(ROOT/'web',file,'<title>'+title+' · Buggcraft</title>',
+                                  seed={'authMode':mode},noindex=True)
                 return public_pages.response(request,html)
             return await public_pages.page(request, file)
 

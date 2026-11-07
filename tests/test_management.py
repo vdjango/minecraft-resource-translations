@@ -10,6 +10,59 @@ from tests.test_platform import PlatformFixture
 
 
 class ManagementCase(PlatformFixture):
+    async def test_inventory_view_requires_login_and_forwards_only_view_filters(self):
+        from unittest.mock import AsyncMock
+        self.config.admin_token='admin-test'
+        payload=dict(action='inventory_files',category='java-raw',handling='platform',offset=50,
+                     query='libjava',summary_only=False,unrelated='ignored')
+        response=await self.client.post('/v1/admin/mirror',json=payload)
+        self.assertEqual(response.status,401)
+        with patch('mc_translate.mirror_control.MirrorControl.call',AsyncMock(return_value=dict(total=24006,files=[]))) as call:
+            response=await self.client.post('/v1/admin/mirror',json=payload,headers={'Authorization':'Bearer admin-test'})
+            self.assertEqual(response.status,200)
+            self.assertEqual((await response.json())['total'],24006)
+            self.assertNotIn('unrelated',call.call_args.args[0])
+            self.assertEqual(call.call_args.args[0]['offset'],50)
+
+    async def test_cloud_save_keeps_legacy_and_multiple_platform_settings(self):
+        from unittest.mock import AsyncMock
+        from mc_translate.mirror import settings_path, read_settings
+        from mc_translate.mirror_catalog import write_json
+        self.config.admin_token='admin-test'
+        self.config.mirror_root=str(Path(self.temp.name)/'mirror')
+        headers={'Authorization':'Bearer admin-test'}
+        with patch('mc_translate.mirror_control.MirrorControl.call', AsyncMock(return_value=None)):
+            for platforms in ('all', ['windows','macos'], []):
+                write_json(settings_path(self.config), {'prefetch_platform':platforms})
+                response=await self.client.post('/v1/admin/mirror',json={'qiniu_paused':False},headers=headers)
+                self.assertEqual(response.status, 200, await response.text())
+                saved=read_settings(self.config, effective=False)
+                self.assertEqual(saved['prefetch_platform'], ['windows','macos','linux'] if platforms=='all' else platforms)
+                self.assertFalse(saved['qiniu_paused'])
+
+    async def test_admin_cookie_accepts_configured_mirror_origin_and_rejects_other_sites(self):
+        from mc_translate.mirror import settings_path
+        from mc_translate.mirror_catalog import write_json
+        self.config.admin_token='admin-test'
+        self.config.public_url='https://translate.example.com'
+        self.config.mirror_root=str(Path(self.temp.name)/'mirror')
+        write_json(settings_path(self.config),{'public_url':'https://mirror.example.com'})
+        response=await self.client.post('/v1/admin/session',headers={'Authorization':'Bearer admin-test'})
+        self.assertEqual(response.status,200)
+        headers={'Cookie':'translation_admin='+response.cookies['translation_admin'].value,
+                 'Origin':'https://mirror.example.com'}
+        # An intentionally invalid action reaches validation, without mutating settings.
+        response=await self.client.post('/v1/admin/mirror',json={'action':'invalid_probe'},headers=headers)
+        self.assertEqual(response.status,400)
+        headers.update({'Host':'mirror-proxy.example.com','Origin':'https://mirror-proxy.example.com',
+                        'X-Forwarded-Proto':'https'})
+        response=await self.client.post('/v1/admin/mirror',json={'action':'invalid_probe'},headers=headers)
+        self.assertEqual(response.status,400)
+        headers['Origin']='https://unrelated.example.com'
+        response=await self.client.post('/v1/admin/mirror',json={'action':'invalid_probe'},headers=headers)
+        self.assertEqual(response.status,403)
+        self.assertEqual((await response.json())['code'],'invalid_origin')
+
     async def test_model_directory_cold_reads_share_one_provider_request(self):
         self.config.admin_token = "admin-test"
         headers = {"Authorization": "Bearer admin-test"}
@@ -51,8 +104,8 @@ class ManagementCase(PlatformFixture):
         account=self.app['api'].admin_accounts
         self.assertFalse(account.initialized)
         first_page=await (await self.client.get('/admin')).text()
-        self.assertIn('data-mode="setup"',first_page)
-        self.assertIn('<h2>设置管理员账户</h2>',first_page)
+        self.assertIn('"authMode":"setup"',first_page)
+        self.assertIn('设置管理员账户',first_page)
         token=account.link_path.read_text().strip().split('#',1)[1]
         body=dict(username='owner',password='chosen-password-2026',password_confirm='chosen-password-2026')
         response=await self.client.post('/v1/admin/setup',json=body,headers={'X-Admin-Setup':'wrong'})
@@ -63,7 +116,7 @@ class ManagementCase(PlatformFixture):
         self.assertEqual(response.cookies['translation_admin']['path'],'/')
         self.assertEqual((await self.client.get('/v1/admin/settings')).status,200)
         html=await (await self.client.get('/admin/tasks')).text()
-        self.assertIn('data-mode="session"',html)
+        self.assertIn('"authMode":"session"',html)
         self.assertNotIn('id="panel" class="hidden"',html)
         self.assertFalse(account.link_path.exists())
         self.assertNotIn(body['password'],account.path.read_text())
@@ -111,82 +164,46 @@ class ManagementCase(PlatformFixture):
             (Path(self.config.database).parent / "runtime-config.json").is_file()
         )
 
-    async def test_application_attempts_count_failures_and_accept_http_homepages(self):
-        failed = await self.client.post("/v1/clients/applications", json={})
-        self.assertEqual(failed.status, 400)
-        accepted = await self.client.post(
-            "/v1/clients/applications",
-            json=dict(name="HTTP launcher", contact="maintainer", website="http://example.org", purpose="Test"),
-        )
-        self.assertEqual(accepted.status, 201)
-        self.assertEqual((await accepted.json())["state"], "pending")
-        self.assertEqual((await self.client.post("/v1/clients/applications", json={})).status, 400)
-        limited = await self.client.post("/v1/clients/applications", json={})
-        self.assertEqual(limited.status, 429)
-        self.assertEqual((await limited.json())["code"], "application_daily_limit")
-
-    async def test_developer_approval_quota_owner_and_immediate_revocation(self):
+    async def test_public_application_removed_and_admin_issues_key(self):
         self.config.admin_token = "admin-test"
         admin = {"Authorization": "Bearer admin-test"}
-        response = await self.client.post(
-            "/v1/clients/applications",
-            json=dict(
-                name="Test launcher",
-                contact="test@example.org",
-                website="https://example.org",
-                purpose="Integration test",
-            ),
-        )
+        self.assertEqual((await self.client.post("/v1/clients/applications", json={})).status, 405)
+        self.assertEqual((await self.client.post("/v1/admin/clients", json={"action": "create", "name": "Launcher"})).status, 401)
+        self.assertEqual((await self.client.post("/v1/admin/clients", headers=admin,
+            json={"action": "create", "name": ""})).status, 400)
+        created = await self.client.post("/v1/admin/clients", headers=admin,
+            json={"action": "create", "name": "Launcher", "fields_per_hour": 1})
+        self.assertEqual(created.status, 201)
+        key = (await created.json())["access_token"]
+        self.assertTrue(key.startswith("bct_"))
+        listing = await (await self.client.get("/v1/admin/clients", headers=admin)).text()
+        self.assertIn("Launcher", listing)
+        self.assertNotIn(key, listing)
+        self.assertEqual((await self.client.get("/v1/clients/application",
+            headers={"Authorization": "Bearer " + key})).status, 200)
+
+    async def test_admin_client_quota_owner_and_immediate_revocation(self):
+        self.config.admin_token = "admin-test"
+        admin = {"Authorization": "Bearer admin-test"}
+        response = await self.client.post("/v1/admin/clients", headers=admin,
+            json=dict(action="create", name="Test launcher", contact="test@example.org",
+                      website="https://example.org", purpose="Integration test", fields_per_hour=1))
         self.assertEqual(response.status, 201)
-        application = await response.json()
-        headers = {"Authorization": "Bearer " + application["access_token"]}
-        self.assertEqual(
-            (await self.client.get("/v1/clients/application", headers=headers)).status,
-            200,
-        )
-        self.assertEqual(
-            (
-                await self.client.post(
-                    "/v1/translations:ensure",
-                    headers=headers,
-                    json=dict(self.payload(), purpose="detail"),
-                )
-            ).status,
-            403,
-        )
-        response = await self.client.post(
-            "/v1/admin/clients",
-            headers=admin,
-            json=dict(
-                id=application["application_id"], state="active", fields_per_hour=1
-            ),
-        )
-        self.assertEqual(response.status, 200)
-        self.assertNotIn(application["access_token"], await response.text())
+        issued = await response.json()
+        headers = {"Authorization": "Bearer " + issued["access_token"]}
         result = await self.ensure(headers=headers)
         job = result["results"][0]["tickets"][0]["job_id"]
         self.assertEqual((await self.done(job, headers))["state"], "ready")
-        self.assertEqual(
-            (await self.client.get("/v1/jobs/" + job, headers=self.headers)).status, 404
-        )
-        response = await self.client.post(
-            "/v1/translations:ensure",
+        self.assertEqual((await self.client.get("/v1/jobs/" + job, headers=self.headers)).status, 404)
+        response = await self.client.post("/v1/translations:ensure",
             headers=dict(headers, **{"Idempotency-Key": "quota-test-0001"}),
-            json=dict(self.payload("body"), purpose="detail"),
-        )
+            json=dict(self.payload("body"), purpose="detail"))
         self.assertEqual(response.status, 429)
-        await self.client.post(
-            "/v1/admin/clients",
-            headers=admin,
-            json=dict(id=application["application_id"], state="revoked"),
-        )
-        self.assertEqual(
-            (await self.client.get("/v1/jobs/" + job, headers=headers)).status, 403
-        )
+        await self.client.post("/v1/admin/clients", headers=admin,
+            json=dict(id=issued["id"], state="revoked"))
+        self.assertEqual((await self.client.get("/v1/jobs/" + job, headers=headers)).status, 403)
         invalid = {"Authorization": "Bearer bct_invalid"}
-        self.assertEqual(
-            (await self.client.get("/v1/capabilities", headers=invalid)).status, 401
-        )
+        self.assertEqual((await self.client.get("/v1/capabilities", headers=invalid)).status, 401)
 
     async def test_catalogue_summary_only_is_partial_and_body_update_invalidates(self):
         result = await self.ensure()

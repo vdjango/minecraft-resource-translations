@@ -20,6 +20,9 @@ class SourceManagement:
                 source TEXT,path TEXT,target TEXT,origin TEXT,sha1 TEXT,expires REAL,
                 PRIMARY KEY(source,path));
             CREATE INDEX IF NOT EXISTS source_origin ON source_files(origin);
+            CREATE INDEX IF NOT EXISTS source_sha1 ON source_files(sha1,expires);
+            CREATE INDEX IF NOT EXISTS expected_sha1 ON expected(sha1,size);
+            CREATE INDEX IF NOT EXISTS cache_sha1 ON cache(sha1,checked);
             CREATE INDEX IF NOT EXISTS source_target ON source_files(target,path);
             CREATE TABLE IF NOT EXISTS source_hits(path TEXT,target TEXT,hits INTEGER,PRIMARY KEY(path,target));
             CREATE TABLE IF NOT EXISTS source_totals(source TEXT PRIMARY KEY,hits INTEGER NOT NULL);
@@ -88,12 +91,20 @@ class SourceManagement:
         self.owners = owners
 
     async def summary(self):
-        async with self.mirror.db.execute('''SELECT f.source,COUNT(*) files,
-            SUM(CASE WHEN c.url IS NOT NULL AND c.sha1=f.sha1 THEN 1 ELSE 0 END) local_files,
-            COALESCE(SUM(CASE WHEN c.sha1=f.sha1 THEN c.size ELSE 0 END),0) local_bytes,
-            COALESCE(SUM(h.hits),0) redirects FROM source_files f
-            LEFT JOIN cache c ON c.url=f.origin LEFT JOIN source_hits h ON h.path=f.path AND h.target=f.target
-            WHERE f.expires>? GROUP BY f.source''',(time.time(),)) as cursor:
+        async with self.mirror.db.execute('''WITH active AS (
+            SELECT * FROM source_files WHERE expires>?
+            ), copies AS (
+            SELECT DISTINCT f.source,o.digest,o.size FROM active f
+            JOIN cache c ON c.url=f.origin AND c.sha1=f.sha1
+            JOIN objects o ON o.digest=c.object AND o.local=1
+            ), physical AS (
+            SELECT source,COUNT(*) local_files,SUM(size) local_bytes FROM copies GROUP BY source
+            ), coverage AS (
+            SELECT source,COUNT(*) files FROM active GROUP BY source
+            )
+            SELECT c.source,c.files,COALESCE(p.local_files,0) local_files,
+            COALESCE(p.local_bytes,0) local_bytes,0 redirects
+            FROM coverage c LEFT JOIN physical p ON p.source=c.source''',(time.time(),)) as cursor:
             rows = [dict(row) for row in await cursor.fetchall()]
         async with self.mirror.db.execute('SELECT source,hits FROM source_totals') as cursor:
             totals = {row['source']:row['hits'] for row in await cursor.fetchall()}
@@ -107,14 +118,15 @@ class SourceManagement:
 
     async def files(self, data):
         source,offset = str(data.get('source','')),int(data.get('offset',0))
-        if not 0<=offset<=30000 or len(source)>64:
+        if not 0<=offset<=100000 or len(source)>64:
             raise ValueError('invalid source pagination')
         where = 'f.expires>?'+(' AND f.source=?' if source else '')
         args = (time.time(),source) if source else (time.time(),)
         total = await self.mirror.one('SELECT COUNT(*) n FROM source_files f WHERE '+where,args)
         async with self.mirror.db.execute('''SELECT f.source,f.path,f.target,f.sha1,
-            CASE WHEN c.sha1=f.sha1 THEN c.size ELSE NULL END local_bytes,COALESCE(h.hits,0) redirects
+            CASE WHEN c.sha1=f.sha1 AND o.local=1 THEN o.size ELSE NULL END local_bytes,COALESCE(h.hits,0) redirects
             FROM source_files f LEFT JOIN cache c ON c.url=f.origin
+            LEFT JOIN objects o ON o.digest=c.object
             LEFT JOIN source_hits h ON h.path=f.path AND h.target=f.target
             WHERE '''+where+' ORDER BY f.source,f.path LIMIT 50 OFFSET ?',(*args,offset)) as cursor:
             rows = [dict(row) for row in await cursor.fetchall()]

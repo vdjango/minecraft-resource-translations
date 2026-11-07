@@ -53,16 +53,22 @@ class SamplingCase(unittest.IsolatedAsyncioTestCase):
         async def file(request):
             self.ranges.append(request.headers.get('Range'))
             return web.Response(body=b'x'*300000)
+        async def dispatch(request):
+            return web.Response(status=302,headers={'Location':'/file'})
         app = web.Application()
         app.router.add_get('/file',file)
+        app.router.add_get('/dispatch',dispatch)
         self.server = TestServer(app)
         await self.server.start_server()
+        self.allowed_targets = patch('mc_translate.mirror_quality.public_sample_url', side_effect=lambda value:value)
+        self.allowed_targets.start()
 
     async def never(self):
         import asyncio
         await asyncio.Event().wait()
 
     async def asyncTearDown(self):
+        self.allowed_targets.stop()
         await self.quality.close()
         await self.server.close()
         await self.db.close()
@@ -92,3 +98,29 @@ class SamplingCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.quality.metric('test')['samples'],0)
         await self.quality.sync_sources()
         self.assertEqual(await self.quality.history('test'),[])
+
+    async def test_snapshot_exposes_file_coverage_for_game_mirrors(self):
+        await self.db.execute('CREATE TABLE source_files(source TEXT,expires REAL)')
+        await self.db.executemany('INSERT INTO source_files(source,expires) VALUES(?,?)',
+                                  [('bmclapi',time.time()+3600), ('bmclapi',time.time()+3600),
+                                   ('bmclapi',time.time()-1), ('test',time.time()+3600)])
+        self.settings['source_registries'].append(
+            dict(id='bmclapi', url='https://bmclapi2.bangbang93.com', kind='minecraft', enabled=True))
+        snapshot = await self.quality.snapshot()
+        self.assertEqual(snapshot['sources']['bmclapi']['mapped_files'], 2)
+        self.assertEqual(snapshot['sources']['test']['mapped_files'], 1)
+
+    async def test_game_mirror_dispatch_samples_the_download_node(self):
+        await self.quality.probe('test',str(self.server.make_url('/dispatch')),300000)
+        sample = (await self.quality.history('test'))[0]
+        self.assertEqual((sample['status'],sample['outcome'],sample['bytes']), (200,'ok',262144))
+        self.assertEqual(self.ranges,['bytes=0-262143'])
+
+    async def test_redirect_cannot_request_a_private_target(self):
+        self.allowed_targets.stop()
+        from mc_translate.mirror_quality import public_sample_url
+        with self.assertRaisesRegex(ValueError,'Private sample'):
+            public_sample_url('http://127.0.0.1/private')
+        with self.assertRaisesRegex(ValueError,'Private sample'):
+            public_sample_url('https://[::1]/private')
+        self.allowed_targets.start()

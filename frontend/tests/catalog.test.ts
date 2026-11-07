@@ -5,10 +5,11 @@ import {createViews} from '../src/views';
 let dispose:undefined|(()=>void);
 afterEach(()=>{dispose?.();document.body.replaceChildren();});
 it('reconciles a ready list badge when the current detail is still translating',async()=>{
-  document.body.innerHTML='<section id="projects"></section><div id="catalog-seed"></div>';
   const project={resource:{provider:'modrinth',project_id:'example'},title:'Example',summary:'Original',kind:'mod',translation_state:'ready'};
-  document.getElementById('catalog-seed')!.setAttribute('data-catalog',JSON.stringify({projects:[project],total_count:1,next_cursor:null}));
-  const views=createViews();views.catalog.mount(()=>{});dispose=()=>views.dispose();
+  const views=createViews(JSON.stringify({projects:[project],total_count:1,next_cursor:null}));
+  const host=document.createElement('div');document.body.append(host);
+  const app=createApp({render:()=>h(Catalog,{projects:views.catalog.state.projects,language:views.catalog.state.language,loading:false,open:()=>{}})});
+  app.mount(host);dispose=()=>{app.unmount();views.dispose();};
   await nextTick();expect(document.querySelector('.translation-badge')?.textContent).toContain('简介与正文已就绪');
   expect(document.querySelector('.resource-title')?.getAttribute('href')).toBe('/projects/modrinth/example');
   views.catalog.detail(project.resource,[{field:'summary',state:'ready',is_current:true,translation:{text:'当前简介'}},{field:'body',state:'missing',is_current:false,update:{notice:'原文已更新，正在翻译'}}],'简体中文');

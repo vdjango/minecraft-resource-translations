@@ -4,47 +4,31 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from mc_translate.config import Config
-from mc_translate.mail import MailService, send_smtp
+from mc_translate.mail import MailService, send_smtp, enqueue
 from mc_translate.management import Settings
 from tests.test_platform import PlatformFixture
 
 
 class MailCase(PlatformFixture):
-    async def test_application_durable_without_smtp_in_request_and_retries(self):
+    async def test_mail_outbox_is_durable_and_retries(self):
         await self.app["mail"].close()
-        response = await self.client.post(
-            "/v1/clients/applications",
-            json=dict(
-                name="Example",
-                contact="developer@example.org",
-                website="https://example.org",
-                purpose="Integration",
-            ),
-        )
-        receipt = await response.json()
+        async with self.store.transaction() as db:
+            await enqueue(db, "test:mail", {"test": True, "name": "Example"})
         row = await self.store.one("SELECT * FROM mail_outbox")
         self.assertEqual(row["state"], "pending")
         self.assertEqual(row["attempt"], 0)
-        self.assertNotIn(receipt["access_token"], row["payload"])
-        self.assertEqual(
-            json.loads(row["payload"])["application_id"], receipt["application_id"]
-        )
-        sender = MagicMock(
-            side_effect=smtplib.SMTPAuthenticationError(535, b"secret-provider-detail")
-        )
+        sender = MagicMock(side_effect=smtplib.SMTPAuthenticationError(535, b"secret-provider-detail"))
         service = MailService(self.config, self.store, sender)
         self.config.mail_enabled = True
         self.assertTrue(await service.deliver_one())
         row = await self.store.one("SELECT * FROM mail_outbox")
         self.assertEqual(row["error"], "smtp_535")
         self.assertEqual(row["attempt"], 1)
-        self.assertFalse(await service.deliver_one())  # bounded retry, no busy loop
+        self.assertFalse(await service.deliver_one())
         for _ in range(4):
             await self.store.db.execute("UPDATE mail_outbox SET next_attempt=0")
             await service.deliver_one()
-        self.assertEqual(
-            (await self.store.one("SELECT * FROM mail_outbox"))["state"], "failed"
-        )
+        self.assertEqual((await self.store.one("SELECT * FROM mail_outbox"))["state"], "failed")
         self.assertEqual(sender.call_count, 5)
 
     async def test_admin_config_redaction_validation_and_queued_test(self):

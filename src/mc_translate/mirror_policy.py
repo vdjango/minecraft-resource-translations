@@ -12,7 +12,7 @@ def category_for(url, recorded=None):
         return 'mods'
     if host == 'resources.download.minecraft.net' or recorded in ('assets', 'assets-metadata'):
         return 'assets'
-    if '/products/java-runtime/' in path or (recorded or '').startswith('java-'):
+    if '/products/java-runtime/' in path or recorded == 'java' or (recorded or '').startswith('java-'):
         return 'java'
     if host == 'libraries.minecraft.net' or recorded in ('libraries', 'natives', 'logging'):
         return 'libraries'

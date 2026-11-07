@@ -93,7 +93,6 @@ class Store:
         CREATE INDEX IF NOT EXISTS usage_day ON usage(day);
         CREATE INDEX IF NOT EXISTS usage_month ON usage(month);
         CREATE TABLE IF NOT EXISTS budget_pause(id INTEGER PRIMARY KEY CHECK(id=1), resume_at REAL NOT NULL, reason TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS application_attempts(device TEXT NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(device,day));
         CREATE TABLE IF NOT EXISTS quotas(
           bucket TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL,
           PRIMARY KEY(bucket,window));

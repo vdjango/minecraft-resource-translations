@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from mc_translate.api import create_app
 from mc_translate.config import Config
 from mc_translate.mirror import create_mirror, upstreams, validate_settings, read_settings, settings_path
-from mc_translate.mirror_catalog import Inventory, allowed_url, write_json
+from mc_translate.mirror_catalog import Inventory, allowed_url, write_json, prefetch_matches_platform
 from mc_translate.mirror_policy import POLICIES, category_for
 from mc_translate.mirror_routing import source_target
 
@@ -77,6 +77,8 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mirror.job_state['cached'], 1)
         self.assertEqual((await self.mirror.observation.snapshot())['failed_queue']['count'], 1)
         self.mirror.http.get = lambda url, **kw: self.http.get(self.origin.make_url('/data'), **kw)
+        await self.mirror.db.execute('UPDATE mirror_failed_files SET next_retry=0')
+        await self.mirror.db.commit()
         self.mirror.job_state = dict(state='running', action='retry_failures')
         await self.mirror._run_job('retry_failures')
         self.assertEqual(self.mirror.job_state['state'], 'finished')
@@ -133,9 +135,9 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
             response = await self.client.get('/_mirror_node' + path, allow_redirects=False)
         self.assertEqual(response.status, 307)
         self.assertEqual(response.headers['Location'], url)
-        self.assertEqual(seen, [url])
+        self.assertTrue(all(target == url for target in seen))
 
-    async def test_pack_and_resource_zip_routes_use_origin_bytes(self):
+    async def test_pack_archives_redirect_and_resource_zips_follow_policy(self):
         routes = {
             '/mods/modrinth/data/project/versions/release/pack.mrpack':
                 'https://cdn.modrinth.com/data/project/versions/release/pack.mrpack',
@@ -149,10 +151,28 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         for path, upstream in routes.items():
             with self.subTest(path=path):
                 self.assertEqual(upstreams(path), [upstream])
-                result = await self.client.get(path, headers={'X-Buggcraft-Origin-Only': '1'},
+                headers = {'X-Buggcraft-Pack-Archive': '1'} if path.endswith('pack.mrpack') else {}
+                result = await self.client.get(path, headers=headers,
                                                allow_redirects=False)
-                self.assertEqual(result.status, 200)
-                self.assertEqual(await result.read(), self.payload)
+                self.assertEqual(result.status, 307)
+                self.assertEqual(result.headers['Location'], upstream)
+        self.policies(mods='cache')
+        resource_zip = '/mods/curseforge/files/123/456/resources.zip'
+        response = await self.client.get(resource_zip, headers={'X-Buggcraft-Origin-Only': '1'})
+        self.assertEqual((response.status, await response.read()), (200, self.payload))
+        pack_zip = await self.client.get(resource_zip, headers={'X-Buggcraft-Pack-Archive': '1'},
+                                         allow_redirects=False)
+        self.assertEqual(pack_zip.status, 307)
+        settings = read_settings(self.config)
+        alternate = 'https://pack.example.net/resources.zip'
+        settings['sources'] = [dict(prefix=resource_zip, target=alternate,
+                                    mode='redirect', enabled=True)]
+        write_json(settings_path(self.config), validate_settings(settings))
+        mapped_pack = await self.client.get(resource_zip,
+                                            headers={'X-Buggcraft-Pack-Archive': '1'},
+                                            allow_redirects=False)
+        self.assertEqual((mapped_pack.status, mapped_pack.headers['Location']),
+                         (307, alternate))
         self.assertEqual(upstreams('/mods/modrinth/data/x/versions/y/../../private.zip'), [])
 
     def policies(self, **values):
@@ -162,7 +182,7 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_redirect_and_disabled_do_not_contact_origin_even_with_cache(self):
         path = self.asset()
-        await (await self.client.get(path)).read()
+        await self.mirror.ensure(upstreams(path)[0])
         self.assertEqual(self.calls, 1)
         self.policies(assets='redirect')
         for method in ('GET', 'HEAD'):
@@ -200,6 +220,7 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers['Location'], 'https://cdn.modrinth.com/data/abc123/versions/def456/example.jar')
         self.assertEqual(self.calls, 0)
         self.policies(mods='cache')
+        await self.mirror.ensure(upstreams(path)[0])
         response = await self.client.get(path)
         self.assertEqual(response.status, 200)
         self.assertEqual(await response.read(), self.payload)
@@ -207,9 +228,81 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
                     '/mods/curseforge/files/1/2/file.jar?url=https://evil.com'):
             self.assertIn((await self.client.get(bad)).status, (400, 404))
 
-    async def test_launcher_fallback_serves_bytes_or_fails_without_external_redirect(self):
+    async def test_mod_catalog_fast_file_redirects_without_origin_download(self):
+        path = '/mods/curseforge/files/123/456/test.jar'
+        url = upstreams(path)[0]
+        self.policies(mods='cache')
+        item = dict(url=url, sha1=hashlib.sha1(self.payload).hexdigest(),
+                    size=len(self.payload), state='available', speed_kibps=800)
+        await self.mirror.room_cache.import_catalog(dict(files=[item]))
+        response = await self.client.get(path, allow_redirects=False)
+        self.assertEqual((response.status, response.headers['Location']), (307, url))
+        self.assertEqual(response.headers['X-Mirror-Reason'], 'catalog_fast_source')
+        self.assertEqual(self.calls, 0)
+
+        item.update(state='slow', speed_kibps=20)
+        await self.mirror.room_cache.import_catalog(dict(files=[item]))
+        response = await self.client.get(path, allow_redirects=False)
+        self.assertEqual(response.status, 307)
+        await asyncio.gather(*self.mirror.backups.values())
+        response = await self.client.get(path, allow_redirects=False)
+        self.assertEqual((response.status, await response.read()), (200, self.payload))
+        self.assertEqual(self.calls, 1)
+        alternate = 'https://mirror.minguncle.cn/files/123/456/test.jar'
+        await self.mirror.room_cache.import_catalog(dict(files=[dict(
+            item, url=alternate, state='available', speed_kibps=900)]))
+        redirected = await self.client.get(path, allow_redirects=False)
+        self.assertEqual((redirected.status, redirected.headers['Location']), (307, alternate))
+        self.assertEqual(self.calls, 1)
+        await self.mirror.room_cache.import_catalog(dict(files=[
+            dict(item, url=alternate, state='unavailable', speed_kibps=0),
+            dict(item, url='https://mod.mcimirror.top/files/123/456/test.jar',
+                 state='available', speed_kibps=900)]))
+        no_mcim = await self.client.get(path, allow_redirects=False)
+        self.assertEqual((no_mcim.status, await no_mcim.read()), (200, self.payload))
+        self.assertEqual(self.calls, 1)
+
+    async def test_mod_catalog_uses_verified_room_copy_when_public_file_unavailable(self):
+        path = '/mods/curseforge/files/123/456/test.jar'
+        url = upstreams(path)[0]
+        sha1 = hashlib.sha1(self.payload).hexdigest()
+        digest = hashlib.sha256(self.payload).hexdigest()
+        self.policies(mods='cache')
+        await self.mirror.room_cache.import_catalog(dict(files=[dict(
+            url=url, sha256=digest, sha1=sha1, size=len(self.payload),
+            state='unavailable', speed_kibps=0)]))
+        room = self.mirror.room_cache
+        room.path(digest).write_bytes(self.payload)
+        await room.db.execute('INSERT INTO objects(digest,size,created) VALUES(?,?,?)',
+                              (digest, len(self.payload), time.time()))
+        await room.db.execute('''INSERT INTO files
+            (scope,digest,path,size,sha1,urls,touched,lease_until)
+            VALUES(?,?,?,?,?,?,?,?)''',
+            ('test-room', digest, 'mods/test.jar', len(self.payload), sha1,
+             json.dumps([url]), time.time(), time.time() + 3600))
+        await room.db.commit()
+        response = await self.client.get(path, allow_redirects=False)
+        self.assertEqual(response.status, 307)
+        self.assertEqual(response.headers['X-Mirror-Reason'], 'verified_room_file')
+        self.assertEqual(response.headers['Location'],
+                         'https://mirror.bugg.icu/room-cache/files/' + digest)
+        self.assertEqual(self.calls, 0)
+        file_response = await self.client.get('/room-cache/files/' + digest)
+        self.assertEqual((file_response.status, await file_response.read()), (200, self.payload))
+        self.policies(mods='redirect')
+        direct = await self.client.get(path, allow_redirects=False)
+        self.assertEqual((direct.status, direct.headers['Location']), (307, url))
+        self.policies(mods='disabled')
+        disabled = await self.client.get(path, allow_redirects=False)
+        self.assertEqual((disabled.status, disabled.headers['Location']), (307, url))
+
+    async def test_old_launcher_header_respects_live_category_policy(self):
         path = '/mods/modrinth/data/abc123/versions/def456/example.jar'
         headers = {'X-Buggcraft-Origin-Only': '1'}
+        default = await self.client.get(path, headers=headers, allow_redirects=False)
+        self.assertEqual(default.status, 307)
+        self.assertEqual(self.calls, 0)
+        self.policies(mods='cache')
         response = await self.client.get(path, headers=headers, allow_redirects=False)
         self.assertEqual(response.status, 200)
         self.assertEqual(await response.read(), self.payload)
@@ -219,8 +312,9 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
                                         headers=headers, allow_redirects=False)
         self.assertEqual(missing.status, 503)
         self.assertNotIn('Location', missing.headers)
-        direct = await self.client.get(path, allow_redirects=False)
-        self.assertEqual(direct.status, 307)  # Legacy visitors keep the configured mirror policy.
+        self.policies(mods='redirect')
+        direct = await self.client.get(path, headers=headers, allow_redirects=False)
+        self.assertEqual(direct.status, 307)
 
     async def test_prefetch_skips_redirected_categories_and_honors_live_change(self):
         sha = hashlib.sha1(self.payload).hexdigest()
@@ -283,6 +377,7 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 307)
         self.assertEqual(response.headers['Location'], 'https://node.example.com/_mirror_node'+self.asset())
         self.assertEqual(self.calls, 0)
+        await self.mirror.ensure(upstreams(self.asset())[0])
         local = await self.client.get('/_mirror_node'+self.asset(), allow_redirects=False)
         self.assertEqual(local.status, 200)
         self.assertEqual(await local.read(), self.payload)
@@ -293,13 +388,14 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         settings = read_settings(self.config)
         settings.update(quota_gib=1,eviction='lru',protect_latest=0)
         write_json(settings_path(self.config), settings)
-        await (await self.client.get(self.asset())).read()
-        await (await self.client.get('/maven/alias.jar')).read()
+        await self.mirror.ensure(upstreams(self.asset())[0])
+        await self.mirror.ensure(upstreams('/maven/alias.jar')[0])
         # Simulate an almost-full GiB without creating a GiB fixture file.
         await self.mirror.db.execute('UPDATE objects SET size=?', (1024**3-8,))
         await self.mirror.db.execute('UPDATE totals SET bytes=?', (1024**3-8,))
         await self.mirror.db.commit()
         self.payload=b'new bytes'
+        await self.mirror.ensure(upstreams('/maven/new.jar')[0])
         response = await self.client.get('/maven/new.jar')
         self.assertEqual(response.status, 200)
         self.assertEqual(await response.read(), self.payload)
@@ -312,14 +408,15 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         settings = read_settings(self.config)
         settings.update(quota_gib=1,eviction='oldest_version',protect_latest=1)
         write_json(settings_path(self.config), settings)
-        await (await self.client.get(self.asset())).read()
+        await self.mirror.ensure(upstreams(self.asset())[0])
         await self.mirror.db.execute('INSERT INTO priorities VALUES(?,?)', (upstreams(self.asset())[0], 100))
         await self.mirror.db.execute('UPDATE objects SET size=?,priority=100', (1024**3-8,))
         await self.mirror.db.execute('UPDATE totals SET bytes=?', (1024**3-8,))
         await self.mirror.db.commit()
         response = await self.client.get('/maven/old.jar', allow_redirects=False)
         self.assertEqual(response.status, 307)
-        self.assertEqual(response.headers['X-Mirror-Reason'], 'local_507')
+        self.assertEqual(response.headers['X-Mirror-Reason'], 'cache_miss')
+        await asyncio.gather(*self.mirror.backups.values())
         self.assertEqual((await self.client.get(self.asset())).status, 200)
         self.assertEqual(self.mirror.reserved, 0)
 
@@ -388,14 +485,76 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.calls, 0)
             self.policies(assets='cache')
             response = await self.client.get(path, allow_redirects=False)
+            self.assertEqual((response.status, response.headers['Location']), (307, target))
+            await asyncio.gather(*list(self.mirror.backups.values()))
+            response = await self.client.get(path, allow_redirects=False)
             self.assertEqual(response.status, 200)
             self.assertEqual(await response.read(), self.payload)
             self.assertEqual(self.calls, 1)
             # A quality decision still cannot bypass the normal capacity check.
-            with patch.object(self.mirror, 'ensure', new=AsyncMock(side_effect=web.HTTPInsufficientStorage())):
+            with patch.object(self.mirror, 'ensure', new=AsyncMock(side_effect=web.HTTPInsufficientStorage())), \
+                    patch.object(self.mirror, 'cached', new=AsyncMock(return_value=None)):
                 response = await self.client.get(path, allow_redirects=False)
                 self.assertEqual(response.status, 307)
-                self.assertEqual(response.headers['X-Mirror-Reason'], 'local_507')
+                self.assertEqual(response.headers['Location'], target)
+                await asyncio.gather(*list(self.mirror.backups.values()))
+
+    async def test_prefetch_windows_filters_linux_runtime_and_reports_selection(self):
+        sha1=hashlib.sha1(self.payload).hexdigest()
+        files=[dict(url='https://piston-data.mojang.com/v1/objects/'+sha1+'/'+name,
+                    path='/v1/objects/'+sha1+'/'+name,category='java',
+                    sha1=hashlib.sha1(self.payload).hexdigest(),size=len(self.payload),
+                    platforms=platforms)
+               for n,name,platforms in [(1,'libfreetype.so',['linux']),
+                                        (2,'java.dll',['windows-x64']),
+                                        (3,'libjvm.dylib',['macos'])]]
+        write_json(self.mirror.root/'inventory.json',dict(report={'complete':True},files=files))
+        await self.mirror.run_job('prefetch')
+        self.assertEqual(self.mirror.job_state['state'],'finished')
+        self.assertEqual(self.mirror.job_state['platform_skipped'],2)
+        self.assertEqual(self.mirror.job_state['plan']['java']['files'],1)
+        self.assertEqual(self.mirror.job_state['cached'],1)
+        self.assertEqual(self.calls,1)
+        self.assertFalse(prefetch_matches_platform({'url':files[0]['url']},'windows'))
+        self.assertTrue(prefetch_matches_platform(files[0],'all'))
+
+    async def test_prefetch_platform_combinations_keep_common_files_once_and_can_disable(self):
+        files = [dict(url='https://libraries.minecraft.net/example/'+name,
+                      path='/maven/example/'+name, category='libraries',
+                      sha1=hashlib.sha1(self.payload).hexdigest(), size=len(self.payload),
+                      platforms=platforms)
+                 for name, platforms in [('windows.dll', ['windows']), ('linux.so', ['linux']),
+                                         ('mac.dylib', ['macos']), ('common.jar', [])]]
+        write_json(self.mirror.root/'inventory.json', dict(report={'complete': True}, files=files))
+        settings = read_settings(self.config)
+        settings['prefetch_platform'] = ['linux', 'macos']
+        write_json(settings_path(self.config), validate_settings(settings))
+        await self.mirror.run_job('prefetch')
+        # Progress includes scanned files that were excluded by platform.
+        self.assertEqual(self.mirror.job_state['total'], 4)
+        self.assertEqual(self.mirror.job_state['done'], 4)
+        self.assertEqual(self.mirror.job_state['skipped'], 1)
+        self.assertEqual(self.mirror.job_state['plan']['libraries']['files'], 3)
+        self.assertEqual(self.mirror.job_state['platform_skipped'], 1)
+        self.assertEqual(self.mirror.job_state['cached'], 3)
+        self.assertIsNone(await self.mirror.cached(files[0]['url']))
+        settings['prefetch_platform'] = []
+        write_json(settings_path(self.config), validate_settings(settings))
+        calls = self.calls
+        await self.mirror.run_job('prefetch')
+        self.assertEqual(self.mirror.job_state['total'], 4)
+        self.assertEqual(self.mirror.job_state['done'], 4)
+        self.assertEqual(self.mirror.job_state['skipped'], 4)
+        self.assertEqual(self.mirror.job_state['cached'], 0)
+        self.assertEqual(self.mirror.job_state['plan']['libraries']['files'], 0)
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(validate_settings({'prefetch_platform': 'windows'})['prefetch_platform'], ['windows'])
+        self.assertEqual(validate_settings({'prefetch_platform': 'all'})['prefetch_platform'], ['windows', 'macos', 'linux'])
+        self.assertEqual(validate_settings({'prefetch_platform': ['windows', 'windows', 'macos', 'macos']})['prefetch_platform'], ['windows', 'macos'])
+        for invalid in (None, 'android', ['windows', 'android'], {'windows': True}):
+            with self.assertRaises(ValueError):
+                validate_settings({'prefetch_platform': invalid})
+        self.assertFalse(prefetch_matches_platform({'url':'https://example.com/natives-macos-arm64.jar'}, ['linux']))
 
     async def test_source_validation_exact_and_longest_prefix_mapping(self):
         rows=[dict(prefix='/maven/org/',target='https://repo.example.com/org/',mode='redirect',enabled=True),
@@ -425,6 +584,7 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await (await self.client.get('/mirror-api/status')).json())['accepting'])
 
     async def test_range_egress_count_and_bandwidth_offload(self):
+        await self.mirror.ensure(upstreams(self.asset())[0])
         response=await self.client.get(self.asset(),headers={'Range':'bytes=0-9'})
         self.assertEqual(await response.read(),self.payload[:10])
         settings=read_settings(self.config)
@@ -460,11 +620,13 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_checksum_dedup_range_head_and_cache_hits_when_busy(self):
         path = self.asset()
+        await self.mirror.ensure(upstreams(path)[0])
         first = await self.client.get(path)
         self.assertEqual(await first.read(), self.payload)
         self.assertEqual(first.headers['X-Mirror-Verified'], 'upstream-sha1')
         self.assertIn('immutable', first.headers['Cache-Control'])
         self.assertEqual(self.calls, 1)
+        await self.mirror.ensure(upstreams('/maven/org/example/example.jar')[0])
         other = await self.client.get('/maven/org/example/example.jar')
         self.assertEqual(other.status, 200)
         await other.read()
@@ -486,8 +648,9 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         path = '/assets/aa/' + 'a'*40
         response = await self.client.get(path, allow_redirects=False)
         self.assertEqual(response.status, 307)
-        self.assertEqual(response.headers['X-Mirror-Reason'], 'local_502')
+        self.assertEqual(response.headers['X-Mirror-Reason'], 'cache_miss')
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        await asyncio.gather(*self.mirror.backups.values(), return_exceptions=True)
         self.assertEqual((await self.mirror.status())['cached_files'], 0)
         self.assertFalse(list((self.mirror.root/'tmp').iterdir()))
         self.assertEqual(self.mirror.reserved, 0)
@@ -495,24 +658,51 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
     async def test_disk_reserve_denies_new_file(self):
         with patch('mc_translate.mirror.shutil.disk_usage', return_value=SimpleNamespace(free=0)):
             response = await self.client.get(self.asset(), allow_redirects=False)
+            await asyncio.gather(*self.mirror.backups.values(), return_exceptions=True)
         self.assertEqual(response.status, 307)
-        self.assertEqual(response.headers['X-Mirror-Reason'], 'local_507')
+        self.assertEqual(response.headers['X-Mirror-Reason'], 'cache_miss')
         self.assertEqual((await self.mirror.status())['cached_files'], 0)
         self.assertEqual(self.mirror.reserved, 0)
 
     async def test_simultaneous_miss_is_downloaded_once(self):
         self.gate = asyncio.Event()
-        tasks = [asyncio.create_task(self.client.get(self.asset())) for _ in range(3)]
+        tasks = [asyncio.create_task(self.client.get(self.asset(), allow_redirects=False)) for _ in range(3)]
+        # The origin is deliberately blocked: player responses must finish first.
+        responses = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+        for response in responses:
+            self.assertEqual(response.status, 307)
+            self.assertEqual(response.headers['X-Mirror-Reason'], 'cache_miss')
+            self.assertEqual(response.headers['Location'], upstreams(self.asset())[0])
+        self.assertFalse(self.gate.is_set())
         for _ in range(100):
             if self.calls:
                 break
             await asyncio.sleep(.01)
         self.gate.set()
-        responses = await asyncio.gather(*tasks)
-        for response in responses:
-            self.assertEqual(response.status, 200)
-            self.assertEqual(await response.read(), self.payload)
+        await asyncio.gather(*self.mirror.backups.values())
+        response = await self.client.get(self.asset(), allow_redirects=False)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), self.payload)
         self.assertEqual(self.calls, 1)
+
+    async def test_neoforge_miss_uses_enabled_domestic_repository_without_waiting(self):
+        path = '/neoforge-maven/releases/net/neoforged/neoforge/21.1.265/neoforge-21.1.265-installer.jar'
+        settings = read_settings(self.config)
+        settings.update(auto_sources=True, source_registries=[dict(
+            id='bmclapi', name='BMCLAPI', url='https://bmclapi2.bangbang93.com/',
+            kind='minecraft', region='cn', enabled=True)])
+        write_json(settings_path(self.config), validate_settings(settings))
+        self.gate = asyncio.Event()
+        response = await asyncio.wait_for(self.client.get(path, allow_redirects=False), 2)
+        self.assertEqual((response.status, response.headers['Location']), (307,
+            'https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/21.1.265/neoforge-21.1.265-installer.jar'))
+        self.assertFalse(self.gate.is_set())
+        settings['source_registries'][0]['enabled'] = False
+        write_json(settings_path(self.config), validate_settings(settings))
+        response = await self.client.get(path, allow_redirects=False)
+        self.assertEqual(response.headers['Location'], upstreams(path)[0])
+        self.gate.set()
+        await asyncio.gather(*self.mirror.backups.values(), return_exceptions=True)
 
     async def test_fixed_origins_control_auth_and_errors(self):
         for path in ('/https://example.com/a', '/fabric-maven/net/fabricmc/fabric-api/foo.jar', '/assets/ab/'+'a'*40, '/maven/test.jar?url=https://example.com'):
@@ -591,6 +781,7 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
         await self.mirror.db.execute('INSERT INTO expected VALUES(?,?,?,?)',
                                      (url, '0'*40, 1, 'metadata'))
         await self.mirror.db.commit()
+        await self.mirror.ensure(url)
         response = await self.client.get('/mc/game/version_manifest_v2.json')
         self.assertEqual(response.status, 200)
         self.assertEqual(await response.read(), self.payload)
@@ -598,15 +789,20 @@ class MirrorCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_extensionless_loader_metadata_refreshes_after_ttl(self):
         path = '/fabric-meta/v2/versions/loader'
+        await self.mirror.ensure(upstreams(path)[0])
         first = await self.client.get(path)
         self.assertEqual(first.status, 200)
         await first.read()
         self.assertEqual(self.calls, 1)
         await self.mirror.db.execute('UPDATE cache SET fetched=0')
         await self.mirror.db.commit()
-        second = await self.client.get(path)
-        self.assertEqual(second.status, 200)
-        await second.read()
+        second = await self.client.get(path, allow_redirects=False)
+        self.assertEqual(second.status, 307)
+        self.assertEqual(second.headers['X-Mirror-Reason'], 'cache_refresh_pending')
+        await asyncio.gather(*self.mirror.backups.values())
+        refreshed = await self.client.get(path, allow_redirects=False)
+        self.assertEqual(refreshed.status, 200)
+        await refreshed.read()
         self.assertEqual(self.calls, 2)
 
 

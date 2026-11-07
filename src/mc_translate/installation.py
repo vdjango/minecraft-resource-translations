@@ -9,6 +9,7 @@ from aiohttp import web
 from .admin_account import write_private
 from .mirror import read_settings, settings_path, validate_settings
 from .mirror_catalog import write_json
+from .spa_shell import render_shell
 
 
 class Installation:
@@ -142,7 +143,8 @@ class Installation:
     async def page(self, request):
         if not self.required:
             return web.Response(status=302, headers={'Location':'/admin', 'Cache-Control':'no-store'})
-        return self.pages.response(request, (self.pages.root/'setup.html').read_text(encoding='utf-8'))
+        html=render_shell(self.pages.root, 'setup', '<title>首次安装向导 · Buggcraft</title>', noindex=True)
+        return self.pages.response(request, html)
 
     def gate(self, request):
         """Redirect browser entry points; never replace API JSON with HTML."""

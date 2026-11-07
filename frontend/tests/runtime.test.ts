@@ -10,8 +10,8 @@ afterEach(()=>{
 });
 
 describe('page lifecycle',()=>{
-  it('mounts visible page content and preserves the server detail while a request stalls',async()=>{
-    document.body.innerHTML='<main id="project-page"><h1>Server title</h1><div id="project-body"><p>Translated content</p></div></main>';
+  it('mounts visible page content from the server seed while a request stalls',async()=>{
+    document.body.innerHTML='<script type="application/json" data-page-seed>{"title":"Server title","body":"<p>Translated content</p>"}</script>';
     const Page=defineComponent({props:['seed'],setup:props=>()=>h('main',{id:'project-page'},[h('h1',props.seed.title),h('div',{id:'project-body',innerHTML:props.seed.body})])});
     const initialize=vi.fn();
     mountPage(initialize,Page);await nextTick();
@@ -85,10 +85,22 @@ describe('page lifecycle',()=>{
     expect((window as any).legacyFunction).toBe(previous);
     delete (window as any).legacyFunction;
   });
-  it('mounts once and preserves BFCache state until the document really closes',()=>{
+  it('respects the longer caller deadline while retaining page cancellation',async()=>{
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch',vi.fn((_input,init)=>new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(init.signal.reason),{once:true}))));
+    const scope=createScope(),caller=new AbortController();
+    const request=scope.fetch('/long-operation',{signal:caller.signal});
+    const rejected=expect(request).rejects.toMatchObject({name:'AbortError'});
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(scope.state.pending).toBe(1);
+    scope.dispose();await rejected;expect(scope.state.pending).toBe(0);
+  });
+  it('mounts once and preserves BFCache state until the document really closes',async()=>{
+    vi.stubGlobal('scrollTo',vi.fn());
     const initialize=vi.fn();
-    mountPage(initialize);mountPage(initialize);
-    expect(initialize).toHaveBeenCalledOnce();
+    const Page=defineComponent({render:()=>h('main')});
+    mountPage(initialize,Page,'index');mountPage(initialize,Page,'index');
+    await vi.waitFor(()=>expect(initialize).toHaveBeenCalledOnce());
     window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true}));
     expect(document.querySelector('[data-vue-page]')).not.toBeNull();
     window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false}));

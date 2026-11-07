@@ -1,17 +1,13 @@
 <script setup lang="ts">
-import SiteNav from '../SiteNav.vue';
-import AdminNav from '../AdminNav.vue';
 import AdminAccess from '../AdminAccess.vue';
 if(['downloads','storage','distribution','sources','quality','cloudflare'].includes(location.hash.slice(1)))location.replace('/admin/mirror'+location.hash);
 defineProps<{seed:Record<string,string>;views:any}>();
 </script>
 <template>
-<SiteNav />
-<main class="admin-shell">
-<AdminNav />
+
 <div class="admin-content">
 <header class="admin-header"><div><div class="eyebrow">PLATFORM MANAGEMENT</div><h1 id="page-title">翻译设置</h1><p class="muted">配置翻译模型、Token 预算与参考单价。镜像源在独立菜单管理。</p></div><button id="logout" type="button" class="secondary hidden">退出管理</button></header>
-<section id="admin-access" :data-mode="seed.authMode" class="admin-access-host"><AdminAccess v-if="views.access.options" :options="views.access.options" :visible="views.access.visible" /></section><p id="message" class="admin-message" role="status" aria-live="polite"></p>
+<section class="admin-access-host" v-show="views.access.visible"><AdminAccess v-if="views.access.options" :options="views.access.options" :visible="views.access.visible" /></section><p id="message" class="admin-message" role="status" aria-live="polite"></p>
 <div id="panel" class="hidden">
 
 <section id="settings-translation" class="admin-section admin-card"><div class="section-heading"><div><div class="section-caption">MODEL PROVIDER</div><h2>模型服务</h2></div><span class="badge">OpenAI 兼容</span></div><p class="muted">从服务商模型列表选择模型。配置用于后续请求，正在执行的翻译继续完成。</p>
@@ -28,4 +24,4 @@ defineProps<{seed:Record<string,string>;views:any}>();
 
 
 
-</div></div></main></template>
+</div></div></template>

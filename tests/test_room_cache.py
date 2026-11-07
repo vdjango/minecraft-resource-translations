@@ -43,6 +43,7 @@ class RoomCacheCase(unittest.IsolatedAsyncioTestCase):
         self.config = Config(database=str(Path(self.temp.name) / 'translations.sqlite'),
                              mirror_root=str(Path(self.temp.name) / 'mirror'))
         self.settings = validate_settings(dict(auto_sources=False, auto_refresh=False, quality_enabled=False,
+                                               room_cache_public_lookup_enabled=False,
                                                room_cache_probe_enabled=False, reserve_gib=10))
         write_json(settings_path(self.config), self.settings)
         self.env = patch.dict(os.environ, {'TRANSLATION_ROOM_CACHE_SECRET': SECRET, 'TRANSLATION_ROOM_CACHE_KEYS': '{}'})
@@ -118,6 +119,39 @@ class RoomCacheCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.plan())['upload'], [])
         self.assertEqual((await self.cache.snapshot())['files'], 1)
 
+    async def test_batch_manifest_reuses_verified_mirror_and_releases_closed_room(self):
+        files = [dict(path=f'mods/item-{n}.jar', size=64,
+                      sha256=hashlib.sha256(f'room-{n}'.encode()).hexdigest(), downloads=[])
+                 for n in range(43)]
+        mirror_file = files[0]
+        digest = mirror_file['sha256']
+        path = self.cache.mirror.root / 'objects' / digest[:2] / digest
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'mirror file')
+        mirror_file['size'] = path.stat().st_size
+        await self.cache.mirror.db.execute('INSERT INTO objects(digest,size,accessed) VALUES(?,?,?)',
+                                           (digest, mirror_file['size'], time.time()))
+        await self.cache.mirror.db.commit()
+        public_file = files[1]
+        public_url = 'https://edge.forgecdn.net/files/1234/567/public.jar'
+        await self.cache.import_catalog({'files': [dict(url=public_url, sha256=public_file['sha256'],
+            size=public_file['size'], state='available', speed_kibps=2048)]})
+        result = await self.plan(files)
+        self.assertEqual(result['summary']['total'], 43)
+        self.assertEqual(result['summary']['cached'], 1)
+        self.assertEqual(result['summary']['redirect'], 1)
+        self.assertEqual(result['summary']['upload'], 41)
+        self.assertEqual(result['summary']['bytes_to_upload'], 41 * 64)
+        self.assertEqual(result['files'][0]['reason_code'], 'mirror_cached')
+        self.assertEqual(result['files'][1]['downloads'], [public_url])
+        response = await self.client.get('/room-cache/files/' + digest)
+        self.assertEqual((response.status, await response.read()), (200, b'mirror file'))
+        released = await self.client.post('/room-cache/release', headers=self.auth(files))
+        self.assertEqual(released.status, 200)
+        self.assertEqual((await released.json())['released'], 43)
+        self.assertEqual((await self.client.get('/room-cache/files/' + digest)).status, 404)
+        self.assertTrue(path.is_file())  # Other mirror resources are never deleted.
+
     async def test_only_authorized_provider_can_register_or_supply_requested_bytes(self):
         self.assertEqual((await self.client.post('/room-cache/plan', json={'files': [self.file]})).status, 401)
         self.assertEqual((await self.upload()).status, 403)  # No plan requested it yet.
@@ -150,13 +184,29 @@ class RoomCacheCase(unittest.IsolatedAsyncioTestCase):
         await self.cache.db.commit()
         await self.cache.cleanup()
         self.assertFalse(self.cache.path(self.file['sha256']).exists())
-        self.assertEqual((await self.plan())['upload'], [])  # Polling alone cannot keep bodies forever.
+        self.assertEqual((await self.cache.one('SELECT COUNT(*) n FROM files'))['n'], 0)
+        poll=await self.client.post('/room-cache/plan',json={},headers=self.auth())
+        self.assertEqual((await poll.json())['upload'], [])
         response = await self.client.post('/room-cache/resolve', json={
             'wanted': [self.file['sha256']], 'failed': [self.file['sha256']]})
         self.assertEqual(response.status, 200)
-        self.assertEqual(len((await self.plan())['upload']), 1)
+        # Expired metadata is gone. A new explicit manifest starts fresh demand.
+        self.assertEqual(len((await self.plan(files=[self.file]))['upload']), 1)
         self.assertEqual((await self.upload()).status, 200)
         self.assertEqual(await (await self.client.get(self.url())).read(), self.payload)
+
+    async def test_plan_distinguishes_received_bytes_from_verified_cached_files(self):
+        await self.plan()
+        self.cache.upload_progress[self.file['sha256']]=123
+        result=await self.plan()
+        self.assertEqual((result['summary']['receiving'],result['summary']['receiving_bytes']),(1,123))
+        self.assertEqual(result['summary']['cached'],0)
+        self.cache.upload_progress.clear()
+        receipt=await (await self.upload()).json()
+        self.assertEqual(receipt,dict(state='cached',sha256=self.file['sha256'],size=len(self.payload)))
+        result=await self.plan()
+        self.assertEqual(result['summary']['cached'],1)
+        self.assertEqual(result['summary']['cached_bytes'],len(self.payload))
 
     async def test_unknown_speed_redirects_without_probe_then_failed_file_requests_fallback(self):
         url = 'https://mediafilez.forgecdn.net/files/1234/567/private.jar'
@@ -171,14 +221,22 @@ class RoomCacheCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual((await self.plan())['upload'][0]['sha256'], self.file['sha256'])
 
-    async def test_two_slow_samples_trigger_cache_and_recovery_uses_direct(self):
-        self.file['downloads'] = ['https://edge.forgecdn.net/files/1234/567/private.jar']
-        await self.plan()
-        for bad, action in ((1, 'redirect'), (2, 'upload'), (0, 'redirect')):
-            await self.cache.db.execute('UPDATE sources SET bad=?,samples=3,checked=?,speed=10', (bad, time.time()))
-            await self.cache.db.commit()
-            result = await self.plan()
-            self.assertEqual(result['files'][0]['action'], action)
+    async def test_catalog_hash_and_speed_decide_without_fetching(self):
+        url = 'https://edge.forgecdn.net/files/1234/567/private.jar'
+        self.file['downloads'] = [url]
+        self.assertEqual((await self.plan())['files'][0]['action'], 'redirect')
+        entry = dict(url=url, sha256=self.file['sha256'], sha1=self.file['sha1'],
+                     size=self.file['size'], state='slow', speed_kibps=10)
+        for state, speed, action in (('slow', 10, 'upload'),
+                                     ('available', 800, 'redirect'),
+                                     ('unavailable', 0, 'upload')):
+            entry.update(state=state, speed_kibps=speed)
+            await self.cache.import_catalog({'files': [entry]})
+            self.assertEqual((await self.plan())['files'][0]['action'], action)
+        entry['sha256'] = '0' * 64
+        entry['sha1'] = '0' * 40
+        await self.cache.import_catalog({'files': [entry]})
+        self.assertEqual((await self.plan())['files'][0]['action'], 'redirect')
 
     async def test_room_intersection_keeps_one_object_until_last_independent_lease(self):
         await self.plan()  # A starts at 0 hours; 8-hour lease.
@@ -229,6 +287,21 @@ class RoomCacheCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.cache.snapshot())['files'], 0)
         self.assertEqual(self.cache.reserved, 0)
 
+    async def test_zero_local_room_quota_still_allows_independent_cloud_staging(self):
+        profile=dict(id='roomcloud',provider='s3',bucket='room-files',domain='https://s3.example.net',
+            endpoint='https://s3-api.example.net',region='cn-nb1',addressing_style='path',private=True,
+            prefix='room',upload_host='https://up-z0.qiniup.com',quota_gib=10,daily_upload_gib=1)
+        self.settings.update(room_cache_quota_mib=0,room_cache_staging_mib=1,
+            qiniu_profiles=[profile],qiniu_routes={**self.settings['qiniu_routes'],
+                'room_mods':dict(mode='cloud',profile='roomcloud',path='room/mods')})
+        write_json(settings_path(self.config),self.settings)
+        await self.plan()
+        response=await self.upload()
+        self.assertEqual(response.status,200,await response.text())
+        usage=await self.cache.storage_usage()
+        self.assertEqual(usage,dict(local_bytes=0,staging_bytes=len(self.payload)))
+        self.assertEqual(self.cache.reserved_by_kind,dict(local=0,staging=0))
+
     async def test_overlapping_uploads_are_bounded_and_do_not_publish_partial_file(self):
         await self.plan()
         gate = asyncio.Event()
@@ -248,38 +321,28 @@ class RoomCacheCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await first).status, 200)
         self.assertEqual(self.cache.reserved, 0)
 
-    async def test_background_sample_is_bounded_and_daily_budget_is_enforced(self):
-        calls = []
-        async def origin(request):
-            calls.append(request.headers.get('Range'))
-            await asyncio.sleep(.02)
-            return web.Response(body=b'x' * 512 * 1024)
-        app = web.Application()
-        app.router.add_get('/file', origin)
-        server = TestServer(app)
-        await server.start_server()
-        http = ClientSession()
-        await self.cache.http.close()
-        self.cache.http = SimpleNamespace(get=lambda *a, **kw: http.get(server.make_url('/file'), **kw), close=http.close)
-        self.addAsyncCleanup(server.close)
+    async def test_room_submissions_do_not_pollute_operator_catalog(self):
         self.file['downloads'] = ['https://edge.forgecdn.net/files/1234/567/private.jar']
         await self.plan()
-        self.assertEqual(calls, [])  # The planning request never samples.
-        self.settings.update(room_cache_probe_enabled=True, room_cache_slow_kibps=102400)
-        write_json(settings_path(self.config), self.settings)
-        for _ in range(2):
-            await self.cache.db.execute('UPDATE sources SET checked=0')
-            await self.cache.db.commit()
-            await self.cache.probe()
-        self.assertEqual(calls, ['bytes=0-131071'] * 2)
-        self.assertEqual((await self.cache.one('SELECT bad FROM sources'))['bad'], 2)
-        self.assertEqual((await self.cache.one('SELECT bytes FROM budget'))['bytes'], 2 * 128 * 1024)
-        self.assertEqual((await self.plan())['files'][0]['action'], 'upload')
-        await self.cache.db.execute('UPDATE sources SET checked=0')
-        await self.cache.db.execute('UPDATE budget SET bytes=?', (self.settings['room_cache_probe_daily_mib'] * 1024 ** 2,))
-        await self.cache.db.commit()
-        await self.cache.probe()
-        self.assertEqual(len(calls), 2)
+        self.assertEqual((await self.cache.snapshot())['catalog']['files'], 0)
+        self.assertIsNone(await self.cache.one('SELECT host FROM sources LIMIT 1'))
+
+    async def test_public_batch_lookup_uses_bounded_queries_and_survives_room_cache_disabled(self):
+        files=[dict(url=f'https://edge.forgecdn.net/files/1/{i}/example.jar',sha1=f'{i:040x}',
+                    size=65536,state='available') for i in range(1,301)]
+        await self.cache.import_catalog({'files':files})
+        self.settings['room_cache_enabled']=False
+        write_json(settings_path(self.config),self.settings)
+        statements=[]
+        await self.cache.db.set_trace_callback(statements.append)
+        response=await self.client.post('/room-cache/resolve',json={'wanted':[file['sha1'] for file in files]})
+        self.assertEqual(response.status,200,await response.text())
+        self.assertEqual(len((await response.json())['files']),300)
+        selects=[sql for sql in statements if sql.startswith('SELECT')]
+        self.assertLess(len(selects),20)  # Must not grow by one query per file.
+        result=await self.cache.public_files(dict(query=files[0]['sha1']))
+        self.assertEqual(result['total'],1)
+        self.assertEqual(result['files'][0]['url'],files[0]['url'])
 
     def test_room_ttl_does_not_modify_other_resource_policy_and_is_bounded(self):
         settings = validate_settings({'room_cache_ttl_hours': 32})

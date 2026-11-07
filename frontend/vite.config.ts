@@ -1,49 +1,49 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const web = resolve(import.meta.dirname, '../src/mc_translate/web');
 const pages = JSON.parse(readFileSync(new URL('./pages.json', import.meta.url), 'utf8')) as Record<string, string[]>;
+function handwrittenHtml(root:string):string[] {
+  if(!existsSync(root))return [];
+  return readdirSync(root,{withFileTypes:true}).flatMap(item=>{
+    const path=resolve(root,item.name);
+    return item.isDirectory()?handwrittenHtml(path):item.name.endsWith('.html')?[path]:[];
+  });
+}
 export default defineConfig({
   base: '/assets/',
+  define:{__PLATFORM_BUILD_REVISION__:JSON.stringify(Date.now().toString(16).padStart(12,'0'))},
   plugins: [vue(), {
     name: 'existing-page-controllers',
+    buildStart() {
+      const files=[...handwrittenHtml(resolve(import.meta.dirname,'src')),...handwrittenHtml(web)];
+      if(existsSync(resolve(import.meta.dirname,'index.html')))files.push(resolve(import.meta.dirname,'index.html'));
+      if(files.length)this.error('Use Vue components instead of .html files: '+files.join(', '));
+    },
     writeBundle(_options,bundle) {
-      const shell=readFileSync(resolve(import.meta.dirname,'page-shell.js'),'utf8');
+      // The server shell loads this stable CSS file for every admin route.
+      // Vite extracts shared workspace styles into a second asset; fold them
+      // into the stable file so client-side navigation and static deploys agree.
+      const adminCss=resolve(web,'vue-page-admin-mirror.css');
+      // Rollup can rename a shared CSS chunk as the component graph changes.
+      // Use this build's assets rather than guessing a filename or reading an
+      // old artifact left in outDir (emptyOutDir is deliberately disabled).
+      const styles=Object.values(bundle).filter(asset=>asset.type==='asset'&&asset.fileName.endsWith('.css')&&asset.fileName!=='vue-runtime.css');
+      const shared=styles.filter(asset=>asset.fileName!=='vue-page-admin-mirror.css');
+      const page=styles.find(asset=>asset.fileName==='vue-page-admin-mirror.css');
+      if(styles.length)writeFileSync(adminCss,[...shared,...(page?[page]:[])].map(asset=>asset.type==='asset'?String(asset.source):'').join('\n'));
       const lists=readFileSync(resolve(import.meta.dirname,'list-loading.js'),'utf8');
       const cssPath=resolve(web,'platform.css');
-      const shellCSS=shell.match(/style\.textContent = `([\s\S]*?)`;/)?.[1]||'';
       const listCSS=lists.match(/const styles=`([\s\S]*?)`;/)?.[1]||'';
-      writeFileSync(cssPath,readFileSync(cssPath,'utf8').split('/* BUGGCRAFT LOADING STYLES */')[0].trimEnd()+'\n/* BUGGCRAFT LOADING STYLES */\n'+shellCSS.trim()+'\n'+listCSS.trim()+'\n');
+      writeFileSync(cssPath,readFileSync(cssPath,'utf8').split('/* BUGGCRAFT LOADING STYLES */')[0].trimEnd()+'\n/* BUGGCRAFT LOADING STYLES */\n'+listCSS.trim()+'\n');
       const themePath=resolve(web,'theme.js');
       if(existsSync(themePath)){
-        const theme=readFileSync(themePath,'utf8').split('/* BUGGCRAFT PAGE SHELL */')[0].trimEnd();
-        writeFileSync(themePath,theme+'\n/* BUGGCRAFT PAGE SHELL */\n'+shell+'\n'+lists);
+        const theme=readFileSync(themePath,'utf8').split('/* BUGGCRAFT PAGE SHELL */')[0].split('/* BUGGCRAFT LIST LOADING */')[0].trimEnd();
+        writeFileSync(themePath,theme+'\n/* BUGGCRAFT LIST LOADING */\n'+lists);
       }
 
-      for(const name of Object.keys(pages)) {
-        const entry=bundle['vue-page-'+name+'.js'];
-        if(!entry || entry.type!=='chunk')continue;
-        const revision=createHash('sha256').update(entry.code).digest('hex').slice(0,12);
-        const html=resolve(web, name+'.html');
-        const previous=readFileSync(html,'utf8');
-        const needle='vue-page-'+name+'.js';
-        const start=previous.indexOf(needle);
-        const end=previous.indexOf('"',start);
-        let updated=start<0||end<0?previous:previous.slice(0,start+needle.length)+'?v='+revision+previous.slice(end);
-        updated=updated.replace(/<script(?![^>]*data-cfasync)/g,'<script data-cfasync="false"');
-        if(!updated.includes('data-shell-styles'))updated=updated.replace('<link rel="stylesheet" href="/assets/platform.css','<link data-shell-styles rel="stylesheet" href="/assets/platform.css');
-        const dependencies=new Set<string>();
-        const visit=(chunk:typeof entry)=>{for(const dependency of chunk.imports){if(dependencies.has(dependency))continue;dependencies.add(dependency);const item=bundle[dependency];if(item?.type==='chunk')visit(item);}};
-        visit(entry);
-        updated=updated.replace(/<link rel="modulepreload"[^>]*>\s*/g,'');
-        if(name==='index')updated=updated.replace(/<script src="\/?assets\/(?:markdown-it|purify)\.min\.js(?:\?[^"<>]*)?" defer><\/script>/g,'');
-        updated=updated.replace('</head>',[...dependencies].map(file=>`<link rel="modulepreload" href="/assets/${file}">`).join('')+'</head>');
-        updated=updated.replace(/(src|href)="\/?assets\/([^"?]+\.(?:js|css))(?:\?v=[^"]*)?"/g,(match,attribute,file)=>{const path=resolve(web,file);return !file.startsWith('vue-runtime-')&&existsSync(path)?`${attribute}="/assets/${file}?v=${createHash('sha256').update(readFileSync(path)).digest('hex').slice(0,12)}"`:match;});
-        if(previous!==updated)writeFileSync(html,updated);
-      }
     },
     resolveId(id) { if (id.startsWith('page:')) return '\0' + id; },
     load(id) {
@@ -59,12 +59,19 @@ export default defineConfig({
       source = source.replace(/(window|document)\.addEventListener\(/g, 'scope.listen($1,');
       const exports = ['accountView', 'loadSessions', 'refresh'].map(key => `if(typeof ${key}==='function') scope.expose('${key}',${key});`).join('\n');
       return `import {mountPage} from '${resolve(import.meta.dirname,'src/runtime.ts').replaceAll('\\','/')}';
+        import {useNotificationsStore} from '${resolve(import.meta.dirname,'src/stores/notifications.ts').replaceAll('\\','/')}';
         ${name==='index'?`import {prepareContentRenderer} from '${resolve(import.meta.dirname,'src/contentRenderer.ts').replaceAll('\\','/')}';`:''}
+        ${name==='admin-mirror'?`import {useRoomClientCacheStore} from '${resolve(import.meta.dirname,'src/stores/roomClientCache.ts').replaceAll('\\','/')}'; import {useCloudStorageStore} from '${resolve(import.meta.dirname,'src/stores/cloudStorage.ts').replaceAll('\\','/')}'; import {useMirrorPrefetchStore} from '${resolve(import.meta.dirname,'src/stores/mirrorPrefetch.ts').replaceAll('\\','/')}'; import {useSourceQualityStore} from '${resolve(import.meta.dirname,'src/stores/sourceQuality.ts').replaceAll('\\','/')}';`:''}
         import Page from '@pages/${name}.vue';
-        export function mount(){ mountPage(function(scope, pageViews) {
+        export function initialize(scope, pageViews, pageSeed) {
           const {fetch,setTimeout,clearTimeout,setInterval,clearInterval}=scope;
+          const notifications=useNotificationsStore();
+          ${name==='admin-mirror'?'const roomCacheStore=useRoomClientCacheStore();const cloudStore=useCloudStorageStore();const prefetchStore=useMirrorPrefetchStore();const qualityStore=useSourceQualityStore();':''}
           ${source}\n${exports}\n
-        }, Page); } if(!window.__buggcraftRouteLoading)mount();`;
+        }
+        export {Page};
+        export function mount(){ mountPage(initialize, Page, '${name}'); }
+        if(!window.__buggcraftRouteLoading)mount();`;
     },
   }],
   resolve:{alias:{'@pages':resolve(import.meta.dirname,'src/pages')}},

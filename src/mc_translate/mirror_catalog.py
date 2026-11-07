@@ -24,6 +24,45 @@ HOSTS = {
 PRIORITY = ContextVar('mirror_version_priority', default=0)
 
 
+PREFETCH_PLATFORMS = ('windows', 'macos', 'linux')
+
+
+def selected_prefetch_platforms(value):
+    """Accept legacy single-platform settings and canonical ordered selections."""
+    if isinstance(value, str):
+        value = list(PREFETCH_PLATFORMS) if value == 'all' else [value]
+    if (not isinstance(value, list)
+            or any(not isinstance(name, str) or name not in PREFETCH_PLATFORMS for name in value)):
+        raise ValueError('预下载平台无效，请重新选择 Windows、macOS 或 Linux 后保存；未选择表示暂停预下载。')
+    return [name for name in PREFETCH_PLATFORMS if name in value]
+
+
+def prefetch_matches_platform(item, platform):
+    """Keep the full catalogue, but prefetch binaries for selected clients."""
+    selected = selected_prefetch_platforms(platform)
+    if not selected:
+        return False
+    return any(_prefetch_matches_platform(item, name) for name in selected)
+
+
+def _prefetch_matches_platform(item, platform):
+    platforms = item.get('platforms') or []
+    if platforms:
+        return any(str(name).lower().startswith(platform) for name in platforms)
+    name = item['url'].rsplit('/', 1)[-1].lower()
+    if platform == 'windows':
+        return not (name.endswith(('.so', '.dylib', '.jnilib')) or
+                    'natives-linux' in name or 'natives-osx' in name or
+                    'natives-macos' in name)
+    if platform == 'linux':
+        return not (name.endswith(('.dll', '.exe', '.dylib', '.jnilib')) or
+                    'natives-windows' in name or 'natives-osx' in name or 'natives-macos' in name)
+    if platform == 'macos':
+        return not (name.endswith(('.dll', '.exe', '.so')) or
+                    'natives-windows' in name or 'natives-linux' in name)
+    return True
+
+
 def allowed_url(url):
     u = urlsplit(url)
     return (u.scheme == 'https' and u.hostname in HOSTS and u.port in (None, 443)
@@ -70,7 +109,7 @@ class Inventory:
         self.progress = {}
         self.changed_urls = set()
 
-    def add(self, item, category, url=None):
+    def add(self, item, category, url=None, platform=None):
         url = url or item.get('url')
         if not url or not allowed_url(url):
             if url:
@@ -82,8 +121,13 @@ class Inventory:
         if category.startswith('java-') and path.startswith('/v1/'):
             path = '/java' + path
         priority = max(self.items.get(url, {}).get('priority', 0), PRIORITY.get())
+        previous = self.items.get(url, {})
+        platforms = set(previous.get('platforms', []))
+        if platform:
+            platforms.add(platform)
         self.items[url] = dict(url=url, path=path, category=category,
-                               size=size, sha1=sha1, priority=priority)
+                               size=size, sha1=sha1, priority=priority,
+                               **({'platforms': sorted(platforms)} if platforms else {}))
         self.changed_urls.add(url)
 
     async def fetch_json(self, session, url, sha1=None, category='metadata'):
@@ -159,7 +203,7 @@ class Inventory:
                 self.items = {item['url']: item for item in saved['files']}
             else:
                 previous = {}
-        state = dict(versions={}, indices={}, java={})
+        state = dict(versions={}, indices={}, java={}, catalogue_schema=2)
         self.progress = dict(phase='manifest', incremental=bool(previous))
         changed_versions = 0
         sem = asyncio.Semaphore(self.concurrency)
@@ -185,8 +229,11 @@ class Inventory:
                             downloads = lib.get('downloads', {})
                             if 'artifact' in downloads:
                                 self.add(downloads['artifact'], 'libraries')
-                            for item in downloads.get('classifiers', {}).values():
-                                self.add(item, 'natives')
+                            for classifier, item in downloads.get('classifiers', {}).items():
+                                platform = ('windows' if 'windows' in classifier else
+                                            'linux' if 'linux' in classifier else
+                                            'macos' if 'osx' in classifier or 'mac' in classifier else None)
+                                self.add(item, 'natives', platform=platform)
                         for log in data.get('logging', {}).values():
                             self.add(log['file'], 'logging')
                         if 'assetIndex' in data:
@@ -220,30 +267,46 @@ class Inventory:
                     except Exception as exc:
                         self.errors.append(dict(url=index['url'], status=getattr(exc, 'status', None),
                                                 error=str(exc)[:180] or type(exc).__name__))
-            self.progress = dict(phase='assets', total=len(indices))
+                    finally:
+                        self.progress['done'] = self.progress.get('done', 0) + 1
+            self.progress = dict(phase='assets', done=0, total=len(indices))
             state['indices'].update(previous.get('indices', {}))
             await asyncio.gather(*(assets(index) for index in indices.values()))
             if include_java:
                 try:
                     runtimes = await self.fetch_json(session, JAVA, category='java-metadata')
-                    manifests = {entry['manifest']['url']: entry['manifest']
-                                 for platform in runtimes.values() for releases in platform.values() for entry in releases}
+                    manifests = {}
+                    for platform, components in runtimes.items():
+                        family = ('windows' if platform.startswith('windows') else
+                                  'linux' if platform.startswith('linux') else
+                                  'macos' if platform.startswith(('mac', 'osx')) else platform)
+                        for releases in components.values():
+                            for entry in releases:
+                                manifest = entry['manifest']
+                                record = manifests.setdefault(manifest['url'], dict(manifest=manifest, platforms=set()))
+                                record['platforms'].add(family)
 
-                    async def java(item):
+                    async def java(record):
                         async with sem:
                             try:
+                                item = record['manifest']
                                 signature = item.get('sha1') or item['url']
                                 state['java'][item['url']] = signature
-                                if previous.get('java', {}).get(item['url']) == signature:
+                                if (previous.get('java', {}).get(item['url']) == signature
+                                        and previous.get('catalogue_schema') == 2):
                                     return
                                 data = await self.fetch_json(session, item['url'], item.get('sha1'), 'java-metadata')
                                 for file in data.get('files', {}).values():
                                     for kind, download in file.get('downloads', {}).items():
-                                        self.add(download, 'java-' + kind)
+                                        for platform in record['platforms']:
+                                            self.add(download, 'java-' + kind, platform=platform)
                             except Exception as exc:
                                 self.errors.append(dict(url=item['url'], status=getattr(exc, 'status', None),
                                                         error=str(exc)[:180] or type(exc).__name__))
-                    await asyncio.gather(*(java(item) for item in manifests.values()))
+                            finally:
+                                self.progress['done'] = self.progress.get('done', 0) + 1
+                    self.progress = dict(phase='java', done=0, total=len(manifests))
+                    await asyncio.gather(*(java(record) for record in manifests.values()))
                 except Exception as exc:
                     self.errors.append(dict(url=JAVA, status=getattr(exc, 'status', None),
                                             error=str(exc)[:180] or type(exc).__name__))

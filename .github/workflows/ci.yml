@@ -93,11 +93,12 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux-package, windows-package]
+    needs: [web, linux-package, windows-package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: buggcraft-translation-deb
@@ -106,6 +107,11 @@ jobs:
         with:
           name: mc-translate-windows
           path: dist
+      - name: Create release checksums
+        working-directory: dist
+        run: sha256sum *.deb *.zip > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: docs/releases/${{ github.ref_name }}.md
+          prerelease: false

@@ -15,7 +15,7 @@ from .federation import PublicResolver, origin
 from .mirror_catalog import write_json
 
 PRESET = Path(__file__).parent/'web/mirror-sources.json'
-MAX_MAPPINGS = 30000
+MAX_MAPPINGS = 100000
 BUILTIN_SOURCES = [
     dict(id='aliyun', name='阿里云 Maven', url='https://maven.aliyun.com/repository/public/', kind='maven', region='cn', enabled=True),
     dict(id='huawei', name='华为云 Maven', url='https://repo.huaweicloud.com/repository/maven/', kind='maven', region='cn', enabled=True),
@@ -141,6 +141,7 @@ class SourceDiscovery:
         self.identities = document(str(self.identities_path),*stamp(self.identities_path))
         self.http = None
         self.lock = asyncio.Lock()
+        self.progress = {}
 
     async def close(self):
         if self.http:
@@ -178,8 +179,8 @@ class SourceDiscovery:
             raw = bytearray()
             async for chunk in response.content.iter_chunked(65536):
                 raw.extend(chunk)
-                if len(raw)>4*1024*1024:
-                    raise ValueError('catalogue exceeds 4 MiB')
+                if len(raw)>16*1024*1024:
+                    raise ValueError('catalogue exceeds 16 MiB')
         data = json.loads(raw)
         if not isinstance(data,dict) or not isinstance(data.get('files'),list) or len(data['files'])>MAX_MAPPINGS:
             raise ValueError('invalid source catalogue')
@@ -264,7 +265,9 @@ class SourceDiscovery:
             files = dict(sorted(files.items(),key=lambda pair:pair[1].get('priority',0),reverse=True))
             now,last_error = time.time(),None
             candidates,catalogue_errors = [],{}
+            self.progress = dict(phase='listing', source='', done=0, total=None, active=[])
             for source in registries:
+                self.progress['source'] = source['name']
                 if source['kind']=='catalogue':
                     try:
                         for item in await self.catalogue(source):
@@ -315,9 +318,12 @@ class SourceDiscovery:
             due = [record for offset in range(min(128,max((len(rows) for rows in groups.values()),default=0)))
                    for rows in groups.values() for record in rows[offset:offset+1]][:128]
             semaphore = asyncio.Semaphore(4)
+            self.progress = dict(phase='checksums', done=0, total=len(due), active=[])
             async def check(record):
                 nonlocal last_error
                 async with semaphore:
+                    active = dict(source=record['source'], path=record['path'])
+                    self.progress['active'].append(active)
                     started = time.monotonic()
                     try:
                         checksum = await self.checksum(record['target'])
@@ -333,6 +339,9 @@ class SourceDiscovery:
                         last_error = f'{record["source"]}: {record["error"]}'
                         if now-record.get('verified_at',0)>8*86400:
                             record['matched'] = False
+                    finally:
+                        self.progress['active'].remove(active)
+                        self.progress['done'] += 1
             await asyncio.gather(*(check(record) for record in due))
             by_path = {}
             for record in current.values():
@@ -359,3 +368,4 @@ class SourceDiscovery:
             await asyncio.to_thread(write_json,self.output,result)
             await asyncio.to_thread(write_json,self.crawls_path,dict(sources=self.crawls))
             await asyncio.to_thread(write_json,self.identities_path,self.identities)
+            self.progress.update(phase='finished', active=[])

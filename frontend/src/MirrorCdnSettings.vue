@@ -1,0 +1,15 @@
+<script setup lang="ts">
+import WorkspaceCardHeader from './WorkspaceCardHeader.vue';
+import {computed} from 'vue';
+import WorkspaceTabs from './WorkspaceTabs.vue';
+import {useNotificationsStore} from './stores/notifications';
+const hosts='http.host in {"bugg.icu" "download.bugg.icu" "node.bugg.icu" "translate.bugg.icu" "mirror.bugg.icu" "mirror2.bugg.icu"}';
+const rules=computed(()=>[
+  {id:'static',name:'公共静态资源',action:'允许缓存 · 遵循源站 Cache-Control',expression:`(${hosts} and http.request.uri.path.extension in {"js" "css" "png" "jpg" "jpeg" "webp" "avif" "svg" "ico" "woff" "woff2"} and not starts_with(http.request.uri.path, "/api/") and not starts_with(http.request.uri.path, "/v1/"))`},
+  {id:'bypass',name:'接口与身份认证',action:'绕过缓存',expression:`(${hosts} and (starts_with(http.request.uri.path, "/api/") or starts_with(http.request.uri.path, "/v1/") or starts_with(http.request.uri.path, "/admin") or starts_with(http.request.uri.path, "/login") or starts_with(http.request.uri.path, "/account") or starts_with(http.request.uri.path, "/room-cache/") or starts_with(http.request.uri.path, "/network") or starts_with(http.request.uri.path, "/developers") or starts_with(http.request.uri.path, "/releases/") or starts_with(http.request.uri.path, "/download/") or http.request.uri.path.extension in {"exe" "msi" "dmg" "appimage"}))`},
+  {id:'mirror',name:'公开镜像文件',action:'允许缓存 · 遵循源站 Cache-Control',expression:'((http.host in {"mirror.bugg.icu" "mirror2.bugg.icu" "translate.bugg.icu"} and (starts_with(http.request.uri.path, "/assets/") or starts_with(http.request.uri.path, "/v1/objects/") or starts_with(http.request.uri.path, "/v1/packages/") or starts_with(http.request.uri.path, "/maven/") or starts_with(http.request.uri.path, "/java/") or starts_with(http.request.uri.path, "/fabric-maven/") or starts_with(http.request.uri.path, "/neoforge-maven/") or starts_with(http.request.uri.path, "/quilt-maven/"))) or (http.host eq "download.bugg.icu" and starts_with(http.request.uri.path, "/admin/assets/")))'},
+]);
+async function copy(text:string){try{await navigator.clipboard.writeText(text);useNotificationsStore().notify('规则已复制。');}catch{useNotificationsStore().notify('复制失败，请手动选择规则内容。',true);}}
+function prettyRule(expression:string){return expression.replace(/\{\s*"/g,'{\n    "').replace(/"\s+"/g,'"\n    "').replace(/"\s*\}/g,'"\n  }').replace(/\s+and\s+/g,'\n  and ').replace(/\s+or\s+/g,'\n    or ');}
+</script>
+<template><section class="workspace-card"><WorkspaceCardHeader title="域名与 CDN" description="三条规则依次配置；登录、接口及下载重定向不缓存。"/><WorkspaceTabs :items="rules.map((rule,index)=>[rule.id,(index+1)+' · '+rule.name])" v-slot="{active}" param="rule"><template v-for="rule in rules" :key="rule.id"><div v-if="active===rule.id"><div class="workspace-toolbar"><strong>{{rule.action}}</strong><button type="button" class="secondary" @click="copy(rule.expression)">复制表达式</button></div><pre class="workspace-code">{{prettyRule(rule.expression)}}</pre></div></template></WorkspaceTabs><details class="workspace-help"><summary>部署说明</summary><p>HTTPS 使用 Full (strict)。缓存 TTL 遵循源站；房间文件和私有对象链接绕过缓存。对象存储域名使用服务商的签名与 HTTPS 配置。</p></details></section></template>

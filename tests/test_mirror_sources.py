@@ -58,7 +58,7 @@ class SourceCase(unittest.IsolatedAsyncioTestCase):
         dest = self.mirror.root/'objects'/self.digest[:2]/self.digest
         dest.parent.mkdir(exist_ok=True)
         dest.write_bytes(self.payload)
-        await self.mirror.db.execute('INSERT OR REPLACE INTO objects VALUES(?,?,?,?)',(self.digest,len(self.payload),time.time(),0))
+        await self.mirror.db.execute('INSERT OR REPLACE INTO objects(digest,size,accessed,priority) VALUES(?,?,?,?)',(self.digest,len(self.payload),time.time(),0))
         for path in paths:
             await self.mirror.db.execute('INSERT OR REPLACE INTO cache VALUES(?,?,?,?,?,?,?)',
                 (upstreams(path)[0],self.digest,len(self.payload),self.sha,1,time.time(),'application/java-archive'))
@@ -141,6 +141,21 @@ class SourceCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats[0]['files'],1);self.assertEqual(stats[0]['local_files'],1)
         preview = await self.mirror.sources.preview()
         self.assertEqual(preview['files'],1);self.assertEqual(preview['reclaimable_bytes'],len(self.payload))
+
+    async def test_source_local_usage_deduplicates_objects_and_excludes_cloud_only(self):
+        self.settings([provider('domestic')])
+        paths=[self.path,self.path.replace('unique','shared')]
+        self.inventory([dict(path=path,sha1=self.sha,priority=0) for path in paths])
+        await self.discover();await self.seed_cache(paths)
+        stats=(await self.mirror.sources.summary())[0]
+        self.assertEqual((stats['files'],stats['local_files'],stats['local_bytes']),
+                         (2,1,len(self.payload)))
+        await self.mirror.db.execute('UPDATE objects SET local=0')
+        await self.mirror.db.commit()
+        stats=(await self.mirror.sources.summary())[0]
+        self.assertEqual((stats['files'],stats['local_files'],stats['local_bytes']),(2,0,0))
+        page=await self.mirror.sources.files({'source':'domestic'})
+        self.assertTrue(all(row['local_bytes'] is None for row in page['files']))
 
     async def test_cleanup_rechecks_remote_and_respects_serving_and_shared_objects(self):
         self.settings([provider('domestic')]);self.inventory();await self.discover()

@@ -5,6 +5,7 @@ The separate backend suite verifies the real signed cursor and artifact API.
 """
 
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,8 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import sync_playwright
 
 WEB = Path(__file__).resolve().parents[1] / "src/mc_translate/web"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from mc_translate.spa_shell import render_shell
 RESOURCE = dict(
     provider="modrinth",
     project_id="Fixture00",
@@ -127,18 +130,15 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(1.2)
                 return self.send(dict(generation_available=True))
             return self.send({}, status=404)
-        relative = (
-            "index.html"
-            if url.path == "/"
-            else "docs.html"
-            if url.path == "/docs"
-            else url.path.removeprefix("/assets/")
-        )
+        if url.path in ("/", "/docs"):
+            entry = "index" if url.path == "/" else "docs"
+            return self.send(render_shell(WEB, entry, '<title>Browser fixture</title>').encode(),
+                             "text/html; charset=utf-8")
+        relative = url.path.removeprefix("/assets/")
         file = (WEB / relative.lstrip("/")).resolve()
         if not file.is_relative_to(WEB) or not file.is_file():
             return self.send({}, status=404)
         mime = {
-            ".html": "text/html; charset=utf-8",
             ".css": "text/css",
             ".js": "application/javascript",
         }.get(file.suffix, "text/plain; charset=utf-8")
